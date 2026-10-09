@@ -44,6 +44,13 @@ const SYSTEM_SECRET_TOP = new Set(['.secrets', 'codex', 'grok', 'kimi']);
 
 function sha256(data) { return crypto.createHash('sha256').update(data).digest('hex'); }
 function slash(p) { return String(p || '').replace(/\\/g, '/').replace(/^\.\//, ''); }
+// A portable bundle cannot contain names that alias on Windows or normalize to
+// another entry. Containment alone does not prevent ADS/device writes or overwrites.
+function portablePath(p) {
+  if (typeof p !== 'string' || !p || /[\\<>:"|?*\x00-\x1f]/.test(p)) return false;
+  return p.split('/').every(part => part && part !== '.' && part !== '..'
+    && !/[. ]$/.test(part) && !/^(?:con|prn|aux|nul|conin\$|conout\$|clock\$|com[1-9¹²³]|lpt[1-9¹²³])$/i.test(part.split('.')[0].trimEnd()));
+}
 function systemSecretPath(p) { return SYSTEM_SECRET_TOP.has(slash(p).split('/')[0].toLowerCase()); }
 function clone(v) { return JSON.parse(JSON.stringify(v)); }
 function isObj(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
@@ -379,7 +386,7 @@ function validate(bundle) {
   const seen = new Set();
   for (const row of files) {
     const rel = slash(row && row.path);
-    if (!rel || rel.startsWith('/') || rel.split('/').includes('..')) { errors.push('unsafe bundle path: ' + rel); continue; }
+    if (!portablePath(row && row.path)) { errors.push('unsafe bundle path: ' + rel); continue; }
     if (systemSecretPath(rel)) errors.push('bundle contains forbidden system credential path: ' + rel);
     if (seen.has(rel.toLowerCase())) errors.push('duplicate bundle path: ' + rel);
     seen.add(rel.toLowerCase());
@@ -469,7 +476,9 @@ function restore(opts) {
       if (dest !== stage && !dest.startsWith(stage + path.sep)) throw new Error('unsafe restore path: ' + rel);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       const data = Buffer.from(row.data, 'base64');
-      fs.writeFileSync(dest, data);
+      // A filesystem alias not caught by portable validation must never replace
+      // an earlier payload in the staging tree (for example a short-name alias).
+      fs.writeFileSync(dest, data, { flag: 'wx' });
       const back = fs.readFileSync(dest);
       if (sha256(back) !== row.sha256) throw new Error('restore read-back mismatch: ' + rel);
       restored.push({ path: rel, bytes: data.length, categories: row.categories || [] });
