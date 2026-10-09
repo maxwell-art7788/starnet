@@ -25204,6 +25204,9 @@ function serveRunRecoveries(req, res) {
   catch (e) { return respondJson(res, 500, { error: 'could not read run recoveries' }); }
   const rows = page.rows.map(markRunRecoveryForensic).filter(r => {
     if (!r) return false;
+    // A second window may poll while the original run is awaiting its model or consent.
+    // A durable checkpoint alone does not make that live run an interrupted recovery.
+    if (runJournal.isOwned(r.runId)) return false;
     // Converge this run's interrupted-history row with its journal (idempotent; skips live and finished runs).
     try { syncInterruptedRunHistory(r); } catch (e) { failNote('run-history.interrupted-sync', e); }
     // A durable transcript acknowledgement is the commit record. If the process died between that record and
@@ -25229,6 +25232,7 @@ async function handleRunRecoveryResolve(req, res) {
     || !/^[A-Za-z0-9._:-]{8,100}$/.test(resolutionId)) {
     return json(400, { error: 'runId, owned agentId, and resolutionId are required' });
   }
+  if (runJournal.isOwned(runId)) return json(409, { error: 'run is still active' });
   let current;
   try { current = inspectRunRecovery(runId); }
   catch (_) { return json(404, { error: 'recovery not found' }); }
@@ -25286,6 +25290,7 @@ async function handleRunRecoveryContinue(req, res) {
     || !/^[A-Za-z0-9._:-]{8,100}$/.test(continuationId)) {
     return json(400, { error: 'runId, owned agentId, and continuationId are required' });
   }
+  if (runJournal.isOwned(runId)) return json(409, { error: 'run is still active' });
   const automatic = body.mode === 'automatic';
   if (!automatic && body.confirmedSafeContinuation !== true) {
     return json(400, { error: 'explicit safe-continuation confirmation is required' });
@@ -25333,6 +25338,7 @@ function consumeRunRecoveryContinuation(request, agentId, continuedRunId) {
   const sourceRunId = String(body.sourceRunId || '');
   const continuationId = String(body.continuationId || '');
   if (!sourceRunId || !continuationId || !isAgentId(String(agentId || ''))) return { ok: false, code: 400, error: 'invalid continuation identity' };
+  if (runJournal.isOwned(sourceRunId)) return { ok: false, code: 409, error: 'run is still active' };
   let current;
   try { current = inspectRunRecovery(sourceRunId); }
   catch (_) {
