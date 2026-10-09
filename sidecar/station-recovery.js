@@ -23,7 +23,10 @@ const fsNative = require('fs');
 const pathNative = require('path');
 
 const SCHEMA = 'starnet.station-recovery';
-const VERSION = 1;
+const VERSION = 2;
+// Explicit caller declarations, never inferred from a missing file. A populated store
+// deleted by accident must still fail the default completeness check.
+const EMPTY_ELIGIBLE = new Set(['routines', 'loops', 'projects', 'permissions', 'connector_references']);
 const REQUIRED_CATEGORIES = [
   'agents', 'rooms_props', 'conversations', 'memories', 'routines', 'loops', 'tasks',
   'projects', 'deliverables', 'permissions', 'connector_references'
@@ -243,11 +246,17 @@ function walkFiles(root, fs, path, unreadable) {
   return out;
 }
 
-function completeness(files, browser) {
+function completeness(files, browser, emptyCategories = []) {
   const have = new Set();
   for (const f of files) for (const c of f.categories || []) have.add(c);
   for (const e of browser || []) for (const c of e.categories || []) have.add(c);
-  return REQUIRED_CATEGORIES.map(category => ({ category, status: have.has(category) ? 'present' : 'missing' }));
+  return REQUIRED_CATEGORIES.map(category => ({ category, status: have.has(category) ? 'present' : emptyCategories.includes(category) ? 'empty' : 'missing' }));
+}
+
+function manifest(bundle) {
+  const value = { files: bundle.files.map(x => ({ path: x.path, bytes: x.bytes, sha256: x.sha256 })), browser: bundle.browser.map(x => ({ key: x.key, bytes: x.bytes, sha256: x.sha256 })), recoveryPoint: bundle.recoveryPoint };
+  if (bundle.version >= 2) value.emptyCategories = bundle.emptyCategories;
+  return sha256(Buffer.from(JSON.stringify(value), 'utf8'));
 }
 
 function capture(opts) {
@@ -325,8 +334,14 @@ function capture(opts) {
   }
 
   stableSort(files, x => x.path); stableSort(skipped, x => x.path); stableSort(browser, x => x.key);
-  const requirements = completeness(files, browser);
-  const complete = requirements.every(x => x.status === 'present');
+  const emptyCategories = o.emptyCategories == null ? [] : o.emptyCategories;
+  if (!Array.isArray(emptyCategories) || new Set(emptyCategories).size !== emptyCategories.length || emptyCategories.some(c => !EMPTY_ELIGIBLE.has(c))) throw new Error('invalid empty category declaration');
+  // Neither skipped/unreadable paths nor superseded store generations prove emptiness.
+  for (const c of emptyCategories) {
+    if (files.some(f => f.categories.includes(c)) || skipped.some(f => categoriesFor(f.path).includes(c))) throw new Error('cannot declare an existing or skipped category empty: ' + c);
+  }
+  const requirements = completeness(files, browser, emptyCategories);
+  const complete = requirements.every(x => x.status !== 'missing');
   const uniqueReauth = [];
   const seenReauth = new Set();
   for (const row of reauthentication) {
@@ -348,9 +363,10 @@ function capture(opts) {
     },
     files,
     browser,
+    emptyCategories: emptyCategories.slice().sort(),
     report: { complete, requirements, skipped, reauthentication: uniqueReauth }
   };
-  bundle.manifestSha256 = sha256(Buffer.from(JSON.stringify({ files: files.map(x => ({ path: x.path, bytes: x.bytes, sha256: x.sha256 })), browser: browser.map(x => ({ key: x.key, bytes: x.bytes, sha256: x.sha256 })), recoveryPoint: bundle.recoveryPoint }), 'utf8'));
+  bundle.manifestSha256 = manifest(bundle);
   return bundle;
 }
 
@@ -376,10 +392,15 @@ function validate(bundle) {
     if (data.length !== Number(row.bytes) || sha256(data) !== row.sha256) errors.push('browser payload checksum mismatch: ' + row.key);
     if (browserKeyIsSecret(row.key)) errors.push('bundle contains forbidden browser credential key: ' + row.key);
   }
-  const expectedManifest = sha256(Buffer.from(JSON.stringify({ files: files.map(x => ({ path: x.path, bytes: x.bytes, sha256: x.sha256 })), browser: browser.map(x => ({ key: x.key, bytes: x.bytes, sha256: x.sha256 })), recoveryPoint: bundle && bundle.recoveryPoint }), 'utf8'));
+  const emptyCategories = bundle && bundle.version >= 2 ? bundle.emptyCategories : [];
+  if (!Array.isArray(emptyCategories) || new Set(emptyCategories).size !== emptyCategories.length || emptyCategories.some(c => !EMPTY_ELIGIBLE.has(c))) errors.push('invalid empty category declaration');
+  const declaredEmpty = Array.isArray(emptyCategories) ? emptyCategories : [];
+  for (const c of declaredEmpty) if (files.some(f => categoriesFor(f.path).includes(c))) errors.push('empty category contains files: ' + c);
+  const expectedManifest = manifest({ ...bundle, files, browser });
   if (bundle && bundle.manifestSha256 !== expectedManifest) errors.push('manifest checksum mismatch');
-  const requirements = completeness(files, browser);
-  if (bundle && bundle.report && bundle.report.complete && requirements.some(x => x.status !== 'present')) errors.push('bundle claims completeness but required categories are missing');
+  // Category labels in an input bundle are descriptive metadata, not authority.
+  const requirements = completeness(files.map(f => ({ categories: categoriesFor(f.path) })), browser.map(b => ({ categories: browserCategories(b.key) })), declaredEmpty);
+  if (bundle && bundle.report && bundle.report.complete && requirements.some(x => x.status === 'missing')) errors.push('bundle claims completeness but required categories are missing');
   return { ok: errors.length === 0, errors, requirements };
 }
 

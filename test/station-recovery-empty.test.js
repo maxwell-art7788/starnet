@@ -1,0 +1,37 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), crypto = require('node:crypto');
+const R = require('../sidecar/station-recovery.js');
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'recovery-empty-'));
+try {
+  const source = path.join(root, 'source'); fs.mkdirSync(source);
+  const put = (name, value) => fs.writeFileSync(path.join(source, name), JSON.stringify(value));
+  put('agent.save.json', {doc:{agent:{name:'ATLAS'},workstreams:[]}});
+  put('agent.notebook.json', []); put('agent.todo.json', []); put('agent.deliverables.json', []);
+  put('transcript.jsonl', {});
+  const opts = {workspaceRoot:source, now:123};
+  assert.equal(R.capture(opts).report.complete, false, 'missing is never automatically empty');
+  const emptyCategories = ['routines','loops','projects','permissions','connector_references'];
+  const bundle = R.capture({...opts, emptyCategories});
+  assert.equal(bundle.report.complete, true);
+  assert.equal(bundle.report.requirements.filter(x => x.status === 'empty').length, 5);
+  const file = path.join(root, 'backup.json'); R.writeBundleAtomic({bundle,file});
+  const target = path.join(root, 'restored'); R.restore({bundle:R.readBundle(file),targetRoot:target});
+  assert.equal(fs.readFileSync(path.join(target,'agent.save.json'),'utf8'),fs.readFileSync(path.join(source,'agent.save.json'),'utf8'));
+  assert.equal(fs.existsSync(path.join(target,'loops.json')),false,'empty declarations do not invent stores');
+  const cli = require('node:child_process').spawnSync(process.execPath, [path.join(__dirname,'../scripts/station-recovery.mjs'),'backup','--workspace',source,'--output',path.join(root,'cli.json'),'--empty-categories',emptyCategories.join(',')], {encoding:'utf8'});
+  assert.equal(cli.status,0,cli.stderr);
+  assert.equal(R.readBundle(path.join(root,'cli.json')).report.complete,true,'production CLI carries explicit empty declarations');
+  const tampered=structuredClone(bundle); tampered.emptyCategories.pop();
+  assert.equal(R.validate(tampered).ok,false,'empty declarations are checksum bound');
+  assert.throws(()=>R.capture({...opts,emptyCategories:['agents']}),/invalid empty/);
+  put('loops.json.bak',{loops:[{id:'lost'}]});
+  assert.throws(()=>R.capture({...opts,emptyCategories}),/existing or skipped/,'old store evidence cannot be declared empty');
+  fs.unlinkSync(path.join(source,'loops.json.bak')); put('loops.json',{loops:[]});
+  assert.throws(()=>R.capture({...opts,emptyCategories}),/existing or skipped/,'existing files are backed up rather than declared absent');
+  const legacy=structuredClone(bundle); legacy.version=1; delete legacy.emptyCategories; legacy.report.complete=false;
+  legacy.manifestSha256=crypto.createHash('sha256').update(JSON.stringify({files:legacy.files.map(({path,bytes,sha256})=>({path,bytes,sha256})),browser:[],recoveryPoint:legacy.recoveryPoint})).digest('hex');
+  assert.equal(R.validate(legacy).ok,true,'legacy format still reads');
+  assert.throws(()=>R.restore({bundle:legacy,targetRoot:path.join(root,'bad')}),/incomplete/);
+  console.log('station-recovery-empty: explicit emptiness, checksums, restore, legacy and refusal PASS');
+} finally { assert.equal(path.dirname(root),path.resolve(os.tmpdir())); fs.rmSync(root,{recursive:true,force:true}); }
