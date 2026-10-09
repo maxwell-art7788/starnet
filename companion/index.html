@@ -29,6 +29,7 @@
     <section class="details">
       <article class="card"><p class="eyebrow">RUN FROM SOURCE</p><h2>Set up another computer.</h2><p>Install Git and Node.js 22 or later. Allow several GB of free disk space for the source, station assets, and future work.</p><pre><code>git clone --depth 1 https://github.com/maxwell-art7788/starnet.git
 cd starnet
+npm ci
 node sidecar/index.js</code></pre><p>Then open <a href="http://localhost:8787" target="_blank" rel="noopener noreferrer">localhost:8787</a>. Keep the process running while using your station. Cloud model calls may incur provider charges.</p></article>
       <article class="card boundary"><p class="eyebrow">WHAT RUNS WHERE</p><h2>A clear boundary.</h2><p><strong>On this website:</strong> launch links and setup guidance. It has no agent runtime, credential form, or access to your local files.</p><p><strong>On your computer:</strong> the station UI, agent runtime, workspace, and provider connections. This page does not check whether that app is running.</p><a class="text-link" href="https://github.com/androoAGI/starnet/blob/feat/harness-backend/README.md" target="_blank" rel="noopener noreferrer">Read the upstream documentation ↗</a></article>
     </section>
