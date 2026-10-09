@@ -12,7 +12,8 @@ function usage(code = 1) {
     'StarNet station recovery (offline — stop StarNet first)',
     '',
     'Backup:',
-    '  node scripts/station-recovery.mjs backup --workspace <WORKSPACES> --output <file> [--browser-state <backup.json>] [--app-version <v>] [--mutation <id>]',
+    '  node scripts/station-recovery.mjs backup --workspace <WORKSPACES> --output <file> [--browser-state <backup.json>] [--app-version <v>] [--mutation <id>] [--empty-categories <comma-separated names>]',
+    '  Declare an optional category empty only after verifying it is unused in the running station. Missing files alone are not proof. Existing/skipped category files are refused.',
     '',
     'Inspect:',
     '  node scripts/station-recovery.mjs inspect --bundle <file>',
@@ -62,6 +63,7 @@ try {
     const bundle = Recovery.capture({
       workspaceRoot: workspace,
       browserStore: browserStoreFrom(a['browser-state']),
+      emptyCategories: a['empty-categories'] == null ? [] : String(a['empty-categories']).split(',').map(s => s.trim()).filter(Boolean),
       now: Date.now(),
       appVersion: a['app-version'] || 'unknown',
       lastCompletedMutation: a.mutation == null ? null : String(a.mutation)

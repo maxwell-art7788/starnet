@@ -257,6 +257,20 @@
           // A replay of an acknowledged request (including a beacon racing fetch) is idempotent.
           const same = prev && JSON.stringify(Object.assign({}, prev.doc, { updatedAt: prev.requestUpdatedAt == null ? prevUpdated : prev.requestUpdatedAt, _saveRevision: expected, _saveDirty: false })) === JSON.stringify(Object.assign({}, doc, { _saveDirty: false }));
           if (same) return { ok: true, updatedAt: prevUpdated, revision };
+          // Idle windows can autosave the same station with a different timestamp/client.
+          // Acknowledge that no-op without advancing the revision or creating a false
+          // conflict. Actual station fields (including deletions and array order) must match.
+          const content = value => {
+            if (Array.isArray(value)) return value.map(content);
+            if (!value || typeof value !== 'object') return value;
+            return Object.fromEntries(Object.keys(value).sort().map(k => [k, content(value[k])]));
+          };
+          const snapshot = value => {
+            const copy = { ...value };
+            for (const key of ['updatedAt', '_saveRevision', '_saveClient', '_saveDirty']) delete copy[key];
+            return JSON.stringify(content(copy));
+          };
+          if (prev && snapshot(prev.doc) === snapshot(doc)) return { ok: true, updatedAt: prevUpdated, revision };
           if (expected !== revision) {
             // Keep the rejected snapshot durably as well as the current station. Never silently
             // merge whole envelopes: removals and roster/config edits have conflicting semantics.

@@ -13,6 +13,11 @@ try {
   a.updatedAt = 2; a.workstreams.push({ id: 'a', history: ['A'] });
   assert.equal(save(a).revision, 2);
   assert.equal(save(a).revision, 2, 'lost response retry is idempotent');
+  const idle = { workstreams: structuredClone(a.workstreams), agent: {id:'agent'}, updatedAt:99999, _saveRevision:1, _saveClient:'other-window', _saveDirty:true };
+  const noOp = save(idle);
+  assert.equal(noOp.ok, true, 'identical autosave from another window is acknowledged');
+  assert.equal(noOp.revision, 2, 'identical autosave is a no-op despite key order and transport metadata');
+  assert.equal(store.load('agent').updatedAt, 2, 'idle autosave does not advance station timestamp');
   b.updatedAt = 9000; b.workstreams.push({ id: 'b', history: ['B'] });
   const conflict = save(b);
   assert.equal(conflict.conflict, true, 'a fresh timestamp cannot disguise a stale read');
