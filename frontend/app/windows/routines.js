@@ -63,7 +63,12 @@ const RoutineRunResult = (() => {
       ? (result.kind === 'ok' ? 'Saved line output' : 'Saved line output (not a completed delivery)') : 'Saved agent output' });
   }
   const buttonLabel = job => job && job.runsLine === true ? '▶ RUN LINE' : '▶ RUN AGENT';
-  return { fromSaved, tracker, fromManual, fromHistory, buttonLabel };
+  function displayOrder(jobs) {
+    // Presentation only: keep server order within each group and share the same
+    // records so actions still resolve by ID without changing saved schedules.
+    return jobs.filter(j => j.enabled === true).concat(jobs.filter(j => j.enabled !== true));
+  }
+  return { fromSaved, tracker, fromManual, fromHistory, buttonLabel, displayOrder };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = RoutineRunResult;
 (() => {
@@ -458,7 +463,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = RoutineRun
           } catch (_) { notify('could not reach the sidecar', 'warn'); sfx('bad'); }
           refresh();   // re-render the badge from the authoritative GET /api/cron enabled
         });
-        if (jobs.length) { listEl.innerHTML = jobs.map((j, i) => row(j).replace('<div class="mc-row"', '<div class="mc-row" style="--ci:' + i + '"')).join(''); }
+        if (jobs.length) {
+          listEl.innerHTML = '<div class="mc-detail dim">Enabled schedules shown first.</div>' +
+            RoutineRunResult.displayOrder(jobs).map((j, i) => row(j).replace('<div class="mc-row"', '<div class="mc-row" style="--ci:' + i + '"')).join('');
+        }
         else {
           listEl.innerHTML = '<div class="empty-state"><span class="es-glyph">◷</span>' +
             '<b>NO ROUTINES YET</b><span>Put your agent to work on a schedule — a morning brief, a nightly summary, a recurring check.</span>' +

@@ -88,6 +88,51 @@ test('Run labels expose explicit whole-line opt-in only', () => {
   for (const job of [{}, { runsLine: false }, { runsLine: 'true' }]) assert.equal(view.buttonLabel(job), '▶ RUN AGENT');
 });
 
+function scheduleListFixture() {
+  return Object.freeze([
+    ...Array.from({ length: 15 }, (_, i) => Object.freeze({ id: 'paused-' + i, enabled: false, runsLine: false })),
+    Object.freeze({ id: 'enabled-line', enabled: true, runsLine: true }),
+    Object.freeze({ id: 'completed-once', enabled: false, schedule: Object.freeze({ kind: 'once' }), lastRunAt: '2026-01-01T00:00:00Z' })
+  ]);
+}
+
+test('display order promotes enabled schedules without hiding or mutating saved records', () => {
+  const jobs = scheduleListFixture(), before = JSON.stringify(jobs), ordered = view.displayOrder(jobs);
+  assert.equal(ordered.length, 17);
+  assert.notEqual(ordered, jobs);
+  assert.deepEqual(ordered.map(j => j.id), ['enabled-line', ...jobs.slice(0, 15).map(j => j.id), 'completed-once']);
+  assert.equal(JSON.stringify(jobs), before);
+  for (const job of ordered) assert.equal(job, jobs.find(j => j.id === job.id));
+  const mixed = Object.freeze([jobs[0], Object.freeze({ id: 'enabled-earlier', enabled: true }), jobs[16], jobs[15]]);
+  assert.deepEqual(view.displayOrder(mixed).map(j => j.id), ['enabled-earlier', 'enabled-line', 'paused-0', 'completed-once']);
+  assert.deepEqual(view.displayOrder([]), []);
+});
+
+test('actual routine refresh renders enabled first while actions retain the server records', async () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/app/windows/routines.js'), 'utf8');
+  const refresh = source.slice(source.indexOf('    async function refresh() {'), source.indexOf('    // SELF-INITIATION: the agent reasons'));
+  const jobs = scheduleListFixture(), reads = [], listEl = { innerHTML: '', querySelector: () => null };
+  let positioned = 0;
+  const box = {
+    RoutineRunResult: view, listedJobs: [], schedulerArmed: false, maxConsecutive: 0, maxPendingDeliveries: 0,
+    Harness: { api: { get: async url => { reads.push(url); return { enabled: true, jobs }; } } },
+    body: { querySelector: () => null }, listEl, gateEl: { innerHTML: '', querySelector: () => null },
+    tickHealthLine: () => '', positionOut: () => { positioned++; },
+    row: j => '<div class="mc-row" data-id="' + j.id + '"><button>' + view.buttonLabel(j) + '</button></div>',
+    post: () => { throw new Error('Display refresh must not write schedules'); }
+  };
+  vm.createContext(box); vm.runInContext(refresh, box);
+  await box.refresh();
+  assert.deepEqual(reads, ['/api/cron']);
+  assert.equal(box.listedJobs, jobs);
+  assert.equal(positioned, 1);
+  assert.match(listEl.innerHTML, /Enabled schedules shown first/);
+  assert.deepEqual([...listEl.innerHTML.matchAll(/data-id="([^"]+)"/g)].map(m => m[1]),
+    ['enabled-line', ...jobs.slice(0, 15).map(j => j.id), 'completed-once']);
+  assert.match(listEl.innerHTML, /data-id="enabled-line"><button>▶ RUN LINE/);
+  assert.match(listEl.innerHTML, /data-id="paused-0"><button>▶ RUN AGENT/);
+});
+
 test('history cannot apply stale whole-line success to an entry run', () => {
   const r = { runId: 'old', reason: 'done', runsLine: true, resultRunId: 'new',
     lastStatus: 'ok', lastLineOutcome: { status: 'completed' }, lastOutput: 'new product' };
