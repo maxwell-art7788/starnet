@@ -431,13 +431,24 @@
      turn to produce some.
 
      Deliberately narrow, because a false nudge costs a paid turn:
-       · Only a SUCCESSFUL mutation of a non-prose path arms it. A README or a SKILL.md edit has nothing to run.
+       · Only a SUCCESSFUL mutation of a code/config path arms it. Documents and product artifacts do not
+         acquire a shell-test requirement merely because their extension is not prose.
        · Any PASSING verification DISARMS it — verify.run, or a shell command that reads like a real check. A check
          that ran and failed (non-zero exit, killed, "verify FAILED") leaves it armed: see vosCheckPassed.
        · It never fires without a verification tool actually wired, never on the grace turn (contracted to be
          tool-free), and at most once per run, so a model that refuses to verify still terminates. */
   const VOS_PROSE_EXT = new Set(['md', 'markdown', 'mdx', 'rst', 'txt', 'text', 'adoc', 'asciidoc', 'org', 'log', 'csv', 'tsv', 'json5']);
   const VOS_PROSE_NAME = new Set(['license', 'licence', 'notice', 'authors', 'contributors', 'changelog', 'codeowners', 'readme']);
+  const VOS_ARTIFACT_EXT = new Set(['pdf', 'docx', 'odt', 'rtf', 'xlsx', 'ods', 'pptx', 'odp', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'tif', 'tiff', 'ico', 'mp3', 'wav', 'm4a', 'mp4', 'webm', 'zip']);
+  // JSON is ambiguous: a regression specification or audit report is data, while package.json, a schema,
+  // or a file inside implementation/config/test directories can affect execution. Keep unknown JSON
+  // conservative; exempt only recognizable document paths. This is a nudge heuristic, never a permission
+  // or completion-evidence gate. In particular, a document read-back does not verify a neighboring code edit.
+  const VOS_CONFIG_JSON_RE = /^(?:package(?:-lock)?|npm-shrinkwrap|tsconfig(?:\..+)?|jsconfig|composer(?:-lock)?|deno|vercel|firebase|angular|nx|project|lerna|turbo|biome|manifest|appsettings(?:\..+)?|.+\.(?:config|schema))\.(?:json|jsonc|json5)$/i;
+  const VOS_CODE_DIR_RE = /(?:^|\/)(?:src|lib|app|apps|server|sidecar|shared|test|tests|scripts|config|configs|configuration|\.github|\.vscode|\.devcontainer)(?:\/|$)/i;
+  // Do not include "Documents": it is a common Windows home ancestor of executable projects.
+  const VOS_DOCUMENT_DIR_RE = /(?:^|\/)(?:docs|reports)(?:\/|$)/i;
+  const VOS_DOCUMENT_JSON_RE = /(?:^|[._-])(?:cases|report|audit|findings|handoff|brief|review|evidence|results)(?:[._-]|$)/i;
   // Wire names arrive underscored (the OpenAI function-name grammar forbids '.'), registry names dotted.
   const vosKey = (n) => String(n == null ? '' : n).toLowerCase().replace(/\./g, '_');
   const VOS_MUTATORS = new Set(['fs_write', 'fs_edit', 'fs_patch', 'fs_append']);
@@ -495,8 +506,28 @@
     const dot = base.lastIndexOf('.');
     if (dot <= 0) return !VOS_PROSE_NAME.has(base.toLowerCase());   // extension-less: only prose NAMES are exempt
     const ext = base.slice(dot + 1).toLowerCase();
+    if (VOS_ARTIFACT_EXT.has(ext)) return false;
+    if (/^json[c5]?$/.test(ext)) {
+      const normalized = s.replace(/\\/g, '/');
+      if (base.startsWith('.') || VOS_CONFIG_JSON_RE.test(base) || VOS_CODE_DIR_RE.test(normalized)) return true;
+      if (VOS_DOCUMENT_JSON_RE.test(base.slice(0, dot)) || VOS_DOCUMENT_DIR_RE.test(normalized)) return false;
+    }
     if (VOS_PROSE_EXT.has(ext)) return false;
     return !VOS_PROSE_NAME.has(base.slice(0, dot).toLowerCase());
+  }
+  // An automatic follow-up cannot turn an explicit filesystem-only/no-execution assignment into permission
+  // to run commands. Read only the latest user text, never tool output or the host's own reminder. This
+  // conservative suppression spends no extra model turn; the ordinary tool consent gates remain unchanged.
+  function vosExecutionRestricted(messages) {
+    for (let i = (messages || []).length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (!m || m.role !== 'user') continue;
+      const text = typeof m.content === 'string' ? m.content : (Array.isArray(m.content)
+        ? m.content.filter(p => p && p.type === 'text').map(p => String(p.text || '')).join(' ') : '');
+      if (!text.trim()) continue;
+      return /\b(?:no|without)\s+(?:shell\b|commands?\b|code\s+execution\b)|\b(?:do not|don't|never)\s+(?:run|use|execute|invoke)\s+(?:any\s+)?(?:shell\b|commands?\b|code\b)|\b(?:filesystem|file[- ]?system|file)[- ]only\b/i.test(text);
+    }
+    return false;
   }
   // The path a mutating call targeted, under any of the arg names the fs tools use.
   function vosPathOf(args) {
@@ -908,6 +939,7 @@
     const vosUnverified = new Set();
     const vosExternalUnverified = new Map();
     const vosSourcesUnfetched = new Map();
+    const vosInitialExecutionRestricted = vosExecutionRestricted(messages);
     const sourceGroundingTask = sourceGroundingRequested(messages);
     let vosUsed = 0;
     let vosFailedCheck = '';   // the most recent check that ran against unverified code and did NOT pass ('' = none)
@@ -2061,6 +2093,7 @@
         // on a verification tool actually being wired — demanding proof the run has no way to produce would
         // just burn a turn. Never on the grace turn, which is contracted to be tool-free.
         if (!empty && !graceUsed && vosUsed < VOS_MAX && vosUnverified.size
+            && !vosInitialExecutionRestricted && !vosExecutionRestricted(messages)
             && tools.some(t => { const n = vosKey(t && t.function && t.function.name); return VOS_VERIFIERS.has(n) || n === 'shell_exec'; })) {
           vosUsed++;
           const touched = Array.from(vosUnverified).slice(0, 8).join(', ');
@@ -2069,7 +2102,7 @@
           const premise = vosFailedCheck
             ? 'and are ending although the last check you ran against it (' + vosFailedCheck + ') did NOT pass, and no passing check has run since. A failing check is evidence the change is not done. Fix the cause and rerun the check until it passes, then report what it actually returned. If it cannot be made to pass here, say so plainly: report the failure and state that the change is NOT verified.'
             : 'and are ending without running anything against it. Code that compiles is not code that works, and an unverified claim of "done" is the one thing this station never ships. Run the narrowest real check that proves the change — the project\'s own test/build command via verify_run, or shell_exec if that fits better — then report what it actually returned. If you genuinely cannot run a check here, say so plainly and state what you did NOT verify.';
-          messages.push({ role: 'system', content: '<verify_before_done>You changed code in this run (' + touched + ') ' + premise + '</verify_before_done>' });
+          messages.push({ role: 'system', content: '<verify_before_done>This automatic reminder does not authorize additional tools or override the Commander\'s scope, consent, or no-execution restrictions. You changed code in this run (' + touched + ') ' + premise + '</verify_before_done>' });
           continue;
         }
         // EXTERNAL VERIFY-ON-STOP: a successful custom-connector mutation is not proof that the requested
