@@ -66,6 +66,36 @@
   const { note: failNote } = (typeof require === 'function') ? require('./failopen.js') : { note: function (tag, e) { console.warn('[failopen] ' + tag + ':', (e && e.message) || e); } };
 
   const SILENT_MARKER = '[SILENT]';
+  // Shared by scheduled fires and Run Now: the entry may finish while its line fails.
+  // Keep the last good output, but never turn an incomplete line into a green routine.
+  function applyLineOutcome(state, line, entry, error) {
+    line = line || {}; entry = entry || {};
+    if (String(line.text || '').trim()) state.buf = line.text;
+    if (typeof line.usd === 'number' && isFinite(line.usd)) state.usd = (state.usd || 0) + line.usd;
+    const reason = error ? String(error.message || error)
+      : line.stopped ? String(line.stopped)
+      : line.loopExhausted ? 'review loop exhausted without approval' : null;
+    const noWork = line.workflowStatus === 'no-work' || !String(state.buf || '').trim() || String(state.buf || '').trim() === SILENT_MARKER;
+    state.lineOutcome = {
+      status: reason ? (error ? 'error' : 'blocked') : noWork ? 'no-work' : 'completed',
+      reason: reason,
+      finalAgentId: line.agentId || entry.agentId || null,
+      finalDockId: line.dockId || entry.dockId || null,
+      hops: Array.isArray(line.hops) ? line.hops.length : 0,
+      loopExhausted: line.loopExhausted === true
+    };
+    if (reason) {
+      state.reason = error ? 'line-error' : 'line-blocked';
+      state.errMsg = 'Work line stopped: ' + reason;
+      state.transient = false; // Partial side effects require inspection, never blind replay.
+    }
+    return state.lineOutcome;
+  }
+  function lineHopResult(state) {
+    const reason = String(state.reason || '');
+    return { text: state.buf, usd: state.usd,
+      error: state.errMsg || (reason === 'done' ? null : 'stage ended without completion: ' + (reason || 'missing terminal outcome')) };
+  }
   const iso = cron._internals.iso;   // ms(arg) -> ISO; deterministic (the lint bans only the zero-arg new Date)
   // B4 redacted-egress: the SAME structural redaction the channel tee applies, so both autonomous lanes
   // (routed messages + scheduled cron) ship one shape to the floor — tool_call name-only, tool_result
@@ -288,7 +318,8 @@
           const next = cronStore.markRun(getJobs(), jobId, {
             runId: runId, status: ok ? 'ok' : 'error',
             reason: state.reason || (ok ? 'done' : 'error'),
-            error: errMsg || undefined, transient: transient, output: ok ? reply : undefined, usd: state.usd || 0,
+            error: errMsg || undefined, transient: transient, output: ok || state.lineOutcome ? reply : undefined, usd: state.usd || 0,
+            lineOutcome: state.lineOutcome || null,
             monitorHash: ok ? state.monitorHash : undefined
           }, { now: at, defaultTz: defaultTz, maxConsecutiveFailures: maxConsecutiveFailures });
           committed = setJobs(next) !== false;
@@ -306,7 +337,7 @@
         }
       }
       // job-level outcome: a FAILED run always reports (never silent); SILENT only on a clean, exactly-"[SILENT]" reply.
-      const outcome = !ok ? 'failed' : (reply === SILENT_MARKER ? 'silent' : 'ok');
+      const outcome = !ok ? 'failed' : (reply === SILENT_MARKER || (state.lineOutcome && state.lineOutcome.status === 'no-work') ? 'silent' : 'ok');
       let baseReason = state.reason || (errMsg ? 'error' : 'done');
       // AUTO-PAUSE telemetry: when THIS settlement tripped the consecutive-failure ceiling the job is now
       // disabled — say so on the governed reason string (the payload shape is unchanged; reason is free text).
@@ -547,6 +578,10 @@
           // than 'done' as failure, yet this gate let a truncated run (max_turns/budget/missing terminal —
           // none of which set errMsg) buy every downstream hop on partial stage-one material, then recorded
           // the routine as failed anyway. The reason check closes that split verdict.
+          if (job.runsLine === true && !state.errMsg && state.reason === 'done' && (!String(state.buf || '').trim() || String(state.buf || '').trim() === SILENT_MARKER)) {
+            applyLineOutcome(state, {}, job); finishFire(job.id, runId, state, null); return;
+          }
+          if (job.runsLine === true && !advanceChain && !state.errMsg && state.reason === 'done') applyLineOutcome(state, null, job, new Error('work line runner is unavailable'));
           if (!advanceChain || state.errMsg || state.reason !== 'done' || !String(state.buf || '').trim()) { finishFire(job.id, runId, state, null); return; }
           // hops ride the ROUTINE'S OWN stream so its session reads as one multi-stage job, and each hop renews
           // the lease — a line that outran the heartbeat would be declared a zombie and re-fired mid-work.
@@ -578,12 +613,8 @@
             unattendedGrants: [],
             onHop: function () { renewLease(job.id, runId); }
           })).then(
-            function (line) { if (line && String(line.text || '').trim()) state.buf = line.text; if (line && typeof line.usd === 'number' && isFinite(line.usd)) state.usd += line.usd; finishFire(job.id, runId, state, null); },
-            // A CHAIN FAILURE NEVER CHANGES THE ROUTINE'S OUTCOME: stage one really did run and really did
-            // produce work. Same law the channel path holds — the line is never a gate on the answer.
-            // It is still SAID OUT LOUD: a silently swallowed chain error is indistinguishable from a floor
-            // with no downstream stage, and that is exactly how this shipped broken once already.
-            function (e) { warn('[cron] work line failed after ' + job.agentId + ': ' + ((e && e.message) || e)); finishFire(job.id, runId, state, null); }
+            function (line) { if (job.runsLine === true) applyLineOutcome(state, line, job, line ? null : new Error('work line returned no outcome')); else { if (line && String(line.text || '').trim()) state.buf = line.text; if (line && typeof line.usd === 'number' && isFinite(line.usd)) state.usd += line.usd; } finishFire(job.id, runId, state, null); },
+            function (e) { warn('[cron] work line failed after ' + job.agentId + ': ' + ((e && e.message) || e)); if (job.runsLine === true) applyLineOutcome(state, null, job, e); finishFire(job.id, runId, state, null); }
           );
         },
         function (e) { finishFire(job.id, runId, state, e || new Error('run rejected')); }
@@ -864,5 +895,5 @@
     return headClip + (body.length > max ? '…' + body.slice(-max) : body);
   }
 
-  return { makeCronDriver: makeCronDriver, SILENT_MARKER: SILENT_MARKER, clipScriptError: clipScriptError, SCRIPT_ERROR_TAIL: SCRIPT_ERROR_TAIL };
+  return { makeCronDriver: makeCronDriver, applyLineOutcome: applyLineOutcome, lineHopResult: lineHopResult, SILENT_MARKER: SILENT_MARKER, clipScriptError: clipScriptError, SCRIPT_ERROR_TAIL: SCRIPT_ERROR_TAIL };
 });

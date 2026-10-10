@@ -17,7 +17,7 @@ const MAX_OUTPUT = 12000;    // what the line delivered
 const MAX_RUNS = 40;
 const MAX_NOTES = 12;
 const MAX_NOTE = 2000;
-const STATUSES = { running: 1, delivered: 1, problem: 1, stopped: 1, failed: 1, interrupted: 1 };
+const STATUSES = { running: 1, delivered: 1, 'no-work': 1, problem: 1, stopped: 1, failed: 1, interrupted: 1 };
 const NOTE_KINDS = { fix: 1, example: 1, putback: 1 };
 const ID_RE = /^job-[a-z0-9]{8,24}$/;
 const KEY_RE = /^[A-Za-z0-9_.:-]{1,120}$/;   // a line key (its oldest machine's prop id) / a dock id / a run id / an agent id
@@ -111,4 +111,24 @@ function list(state, o) {
 function get(state, id) { const i = idx(state, id); return i < 0 ? null : state.jobs[i]; }
 const isId = id => ID_RE.test(String(id || ''));
 
-module.exports = { start, finish, note, boot, list, get, isId, normalizeAll, normJob, summary, MAX_JOBS, MAX_OUTPUT, MAX_TEXT, MAX_NOTES };
+// Send Job's verdict is the entire line's outcome, never just clean stage telemetry.
+// Failure wins over an empty/no-work reply; only explicit host-recorded no-work is neutral.
+function sampleOutcome(o) {
+  o = o || {};
+  const runs = Array.isArray(o.runs) ? o.runs : [], line = o.lineOutcome;
+  let error = o.stopped ? 'you stopped this job'
+    : o.onLine === false ? 'the job did not enter through this line'
+    : !runs.length ? 'no step ran'
+    : runs.some(r => r.reason !== 'done') ? 'a step did not finish cleanly'
+    : !line ? 'the line returned no terminal outcome'
+    : line.stopped ? String(line.stopped)
+    : line.workflowStatus === 'blocked' ? 'a workflow stage reported that it was blocked'
+    : line.loopExhausted ? 'review loop exhausted without approval' : '';
+  const noWork = !error && line.workflowStatus === 'no-work';
+  if (!error && !noWork && !o.shipsToOutbox) error = 'the line did not reach its OUTBOX';
+  return { completed: !error && !noWork, noWork,
+    status: o.stopped ? 'stopped' : error ? (runs.length ? 'problem' : 'failed') : noWork ? 'no-work' : 'delivered',
+    error: error || (noWork ? 'No work produced. No result was delivered to the OUTBOX.' : '') };
+}
+
+module.exports = { start, finish, note, boot, list, get, isId, normalizeAll, normJob, summary, sampleOutcome, MAX_JOBS, MAX_OUTPUT, MAX_TEXT, MAX_NOTES };

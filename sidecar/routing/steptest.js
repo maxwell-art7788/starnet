@@ -202,6 +202,7 @@ function makeStepTest(o) {
     if (step && step.loop) {
       loopKey = step.loop; n = W.iter[step.loop] || 0;
       const d = loopDecision(step, ctx, n, W.visited, raw);
+      if (d.stopped) return { next: { kind: 'end', reason: d.stopped }, text: d.text, halt: d.stopped };
       target = asNode(d.target); text = d.text; again = d.again; exhausted = d.exhausted; looping = d.again;
     } else if (step && (step.dockId || step.agentId)) target = asNode(step);
     if (!target) {

@@ -512,7 +512,9 @@
       next.lastReason = result.reason != null ? String(result.reason) : null;
       next.lastStatus = ok ? 'ok' : 'error';
       next.lastError = ok ? null : (result.error != null ? String(result.error) : 'error');
-      if (ok && result.output != null) next.lastOutput = String(result.output).slice(0, 32000);
+      // Retain useful partial line output beside its explicit failure, never as a success.
+      if ((ok || result.lineOutcome) && result.output != null) next.lastOutput = String(result.output).slice(0, 32000);
+      next.lastLineOutcome = result.lineOutcome ? Object.assign({}, result.lineOutcome) : null;
       if (ok && result.monitorHash != null) {
         next.monitorHash = String(result.monitorHash).slice(0, 200);
         next.monitorLastCheckedAt = iso(now);
@@ -548,8 +550,9 @@
       next.lastUsd = Number.isFinite(Number(result.usd)) ? Number(result.usd) : 0;
       next.finalization = {
         id: String(next.lastRunId || job.id) + ':final', runId: String(next.lastRunId || ''), state: 'pending',
-        outcome: ok ? (String(result.output || '').trim() === '[SILENT]' ? 'silent' : 'ok') : 'failed',
-        result: ok ? String(result.output || '').slice(0, 32000) : '', error: ok ? null : next.lastError,
+        outcome: ok ? (String(result.output || '').trim() === '[SILENT]' || (next.lastLineOutcome && next.lastLineOutcome.status === 'no-work') ? 'silent' : 'ok') : 'failed',
+        result: ok || result.lineOutcome ? String(result.output || '').slice(0, 32000) : '', error: ok ? null : next.lastError,
+        lineOutcome: next.lastLineOutcome,
         usd: next.lastUsd, deliver: String(job.deliver || 'local'), origin: job.origin || null,
         deliveryContext: { name: job.name, prompt: job.prompt, agentId: job.agentId, noAgent: job.noAgent, attachToSession: job.attachToSession },
         destination: String(job.deliver || 'local'), committedAt: iso(now), attempts: 0

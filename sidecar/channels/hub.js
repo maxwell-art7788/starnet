@@ -1876,7 +1876,11 @@
          the inflight try: myRec stays registered for the whole line, so E-STOP (halt.js reads this record) and
          a superseding message reach the downstream stages too — a chain that outlived its own abort handle
          would be an unstoppable spend. The reply that finally leaves is the LAST stage's. */
-      if (chain && !state.errMsg && !myRec.superseded && String(state.buf || '').trim()) {
+      if (chain && !state.errMsg && !myRec.superseded && state.reason === 'done' && !String(state.buf || '').trim() && onLineOutcome) {
+        try { onLineOutcome({ agentId, dockId: dockId || null, stopped: null, hops: [], usd: 0, workflowStatus: 'no-work', loopExhausted: false }); }
+        catch (e) { failNote('channels.hub.lineOutcome', e); }
+      }
+      if (chain && !state.errMsg && !myRec.superseded && state.reason === 'done' && String(state.buf || '').trim()) {
         const line = await chain.advance({
           agentId: agentId, dockId: dockId || undefined, text: state.buf, originalText: msg.text,
           // the entry run's reconciled spend: the chain's $ ceiling covers the whole line, stage one included
@@ -1906,7 +1910,7 @@
             }
             const hopSink = (name, payload) => {
               let p; try { p = redact(payload); } catch (_) { p = payload; }
-              if (name === 'agent.run.end' && p && p.reason === 'cancelled') hs.stopped = true;   // STOP on this step: the line stops here, never hands its half answer on
+              if (name === 'agent.run.end') hs.reason = p.reason;
               if (name === 'agent.token') hs.buf += (p.delta || '');
               else if (name === 'agent.tool_call') hs.buf = '';
               else if (name === 'agent.run.error') hs.errMsg = p.message || 'run error';
@@ -1937,13 +1941,13 @@
               });
             } catch (e) { hs.errMsg = hs.errMsg || ('run failed: ' + ((e && e.message) || e)); }
             if (hs.buf.trim() && !hs.errMsg) { try { store.appendTurn(hopKey, 'assistant', hs.buf); } catch (e) { failNote('channels.hub.appendTurn', e); } }
-            return { text: hs.buf, usd: hs.usd, error: hs.errMsg || (hs.stopped ? 'stopped by you' : null) };
+            return { text: hs.buf, usd: hs.usd, error: hs.errMsg || (hs.reason === 'done' ? null : 'stage ended without completion: ' + (hs.reason || 'missing terminal outcome')) };
           }
         });
         if (onLineOutcome) {
           // a throwing outcome hook is the HOST's bug (the trigger runner records every fire's truth through it): never
           // let it abort the reply, but never swallow it silently either — the failopen ledger names it
-          try { const lo = { agentId: line.agentId, stopped: line.stopped || null, hops: line.hops.slice(), usd: line.usd }; if (line.dockId) lo.dockId = line.dockId; onLineOutcome(lo); } catch (e) { failNote('channels.hub.lineOutcome', e); }
+          try { const lo = { agentId: line.agentId, stopped: line.stopped || null, hops: line.hops.slice(), usd: line.usd, workflowStatus: line.workflowStatus || null, loopExhausted: line.loopExhausted === true }; if (line.dockId) lo.dockId = line.dockId; onLineOutcome(lo); } catch (e) { failNote('channels.hub.lineOutcome', e); }
         }
         if (!myRec.superseded && line.hops.length) {
           // the line's answer replaces the first stage's — and the floor/channel agree on who produced it

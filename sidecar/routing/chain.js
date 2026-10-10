@@ -53,6 +53,15 @@ function nodeKey(x) {
   if (typeof x === 'string') return x;
   return x.dockId != null ? String(x.dockId) : String(x.agentId || '');
 }
+// Explicit stage control only: quoted instructions or prose mentioning these words
+// never route work. A no-work response has no artifact for another paid stage.
+function workflowStatus(text) {
+  const value = String(text || '').trim();
+  if (value === '[SILENT]') return 'no-work';
+  const last = value.split(/\r?\n/).filter(l => l.trim()).pop() || '';
+  const match = /^WORKFLOW_STATUS: (blocked|no-work)$/.exec(last.trim());
+  return match ? match[1] : null;
+}
 // an event payload plus the additive dockId when the stage has one (never a key with an undefined value)
 function withDock(payload, dockId) { if (dockId) payload.dockId = dockId; return payload; }
 
@@ -96,6 +105,7 @@ function effectiveLimits(raw, fallback, poolCap) {
    done-lane handoff EXHAUSTED so the downstream stage knows nobody approved it. `n` = passes already taken
    round this gate; `text` = the output about to be handed on (returned annotated). Pure: mutates nothing. */
 function loopDecision(step, ctx, n, visited, text) {
+  if (step.requireApproval === true) step = Object.assign({}, step, { when: 'approved' });
   const byVerdict = Verdict.isVerdictWord(step.when);
   const wants = !step.when ? true : byVerdict ? (ctx.verdict !== String(step.when).toLowerCase()) : (ctx.tag === step.when);
   const again = step.backTo && n < step.max && wants;
@@ -103,6 +113,8 @@ function loopDecision(step, ctx, n, visited, text) {
     return { again: true, target: step.backTo, exhausted: false,
       text: '[LOOP — pass ' + (n + 1) + ' of ' + step.max + ' round the gate at ' + step.loop + ']\n' + text };
   }
+  if (step.requireApproval === true && wants) return { again: false, target: null, text, exhausted: n >= step.max,
+    stopped: n >= step.max ? 'review loop exhausted without approval' : 'review requires approval but has no revision target' };
   // spent (or the verdict passed): leave on the done lane — an APPROVED crate leaves without its VERDICT line (R1: the line is the
   // gate's control signal; it never ships as part of the work). An exhausted crate keeps it: the reviewer's last word is evidence.
   // (a reply that is ONLY the verdict line keeps it: stripping it would hand on an empty crate, which the next hop refuses)
@@ -404,6 +416,12 @@ function makeChainRunner(o) {
     let forced = null;   // a queued branch's node, run on this hop in place of the walk's answer
     for (let hop = 1; hop <= 400; hop++) {
       if (s.signal && s.signal.aborted) { out.stopped = 'stopped'; return out; }
+      const control = workflowStatus(out.text);
+      if (control) {
+        out.workflowStatus = control;
+        if (control === 'blocked') out.stopped = cur.agentId + ' reported WORKFLOW_STATUS: blocked';
+        return out;
+      }
       // the tag is derived from the OUTPUT of the stage that just ran — this is what makes a FILTER downstream
       // of a dock a real branch on the result rather than a re-read of the original message.
       let target = null, step = null, loopHop = false, entryBranch = false;
@@ -440,6 +458,7 @@ function makeChainRunner(o) {
           // THE ONE LOOP RULE — loopDecision (module level) holds it; the step-through test reads the same one
           const n = iter[step.loop] || 0;
           const d = loopDecision(step, ctx, n, visited, out.text);
+          if (d.stopped) { out.text = d.text; out.loopExhausted = d.exhausted === true; out.stopped = d.stopped; return out; }
           target = asNode(d.target); out.text = d.text;
           if (d.again) { iter[step.loop] = n + 1; loopHop = true; looping = true; fromTile = null; }
           else { looping = false; if (d.exhausted) out.loopExhausted = true; }

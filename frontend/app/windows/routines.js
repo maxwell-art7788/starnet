@@ -5,6 +5,50 @@
    internals it touches are the enumerated StationUI.h helper surface
    (esc/sfx/notify/fmtRel, consoleSection, and the live present/sel views). */
 'use strict';
+// Shared by the browser and focused local tests. A completed agent turn is not
+// evidence that a whole workflow completed or that it produced a product.
+const RoutineRunResult = (() => {
+  const value = x => String(x == null ? '' : x);
+  function fromSaved(job) {
+    job = job || {};
+    const line = job.lastLineOutcome;
+    if (line && (line.status === 'blocked' || line.status === 'error' || line.loopExhausted === true)) {
+      return { kind: line.status === 'error' ? 'error' : 'blocked', label: line.status === 'error' ? 'Line failed' : 'Line blocked', detail: value(line.reason || job.lastError || 'The line stopped before completion.'), output: '' };
+    }
+    if (job.lastStatus !== 'ok') return { kind: 'error', label: 'Run incomplete', detail: value(job.lastError || job.lastReason || 'Completion was not confirmed.'), output: '' };
+    const output = typeof job.lastOutput === 'string' ? job.lastOutput : null;
+    if ((line && line.status === 'no-work') || (output !== null && (!output.trim() || output.trim() === '[SILENT]'))) {
+      return { kind: 'no-work', label: 'No work produced', detail: output && output.trim() === '[SILENT]' ? 'The agent reported no new work for this run ([SILENT]).' : 'The run ended without an output message.', output: '' };
+    }
+    if (job.runsLine === true && (!line || line.status !== 'completed')) return { kind: 'pending', label: 'Line result unconfirmed', detail: 'The agent finished, but no complete line outcome was recorded. Check the workflow history.', output: output || '' };
+    return { kind: 'ok', label: job.runsLine === true ? 'Line finished' : 'Agent run finished', detail: 'Run completion does not mean a product is approved or published.', output: output || '' };
+  }
+  function tracker() {
+    const state = { runId: null, reason: null, error: '', reply: '' };
+    return {
+      state,
+      accept(event) {
+        const p = (event && event.payload) || {};
+        if (event && event.name === 'agent.run.start' && !state.runId && p.runId) state.runId = p.runId;
+        if (p.runId && state.runId && p.runId !== state.runId) return;
+        if (!event) return;
+        if (event.name === 'agent.token') state.reply += p.delta || '';
+        else if (event.name === 'agent.tool_call') state.reply = '';
+        else if (event.name === 'agent.run.error') state.error = p.message || 'Run failed.';
+        else if (event.name === 'capdenied') state.error = state.error || ('Required access is unavailable: ' + (p.need || p.reason || 'capability'));
+        else if (event.name === 'agent.run.end' && (!state.reason || state.reason === 'done')) state.reason = p.reason || 'missing-terminal-reason';
+      }
+    };
+  }
+  function fromManual(state, saved) {
+    if (state.error || state.reason !== 'done') return { kind: 'error', label: 'Run incomplete', detail: state.error || ('Run ended without completion: ' + (state.reason || 'missing terminal event')), output: '' };
+    if (!state.runId || !saved || saved.lastRunId !== state.runId) return { kind: 'pending', label: 'Result not yet confirmed', detail: 'The stream ended, but its saved result could not be confirmed. Refresh or open run history.', output: state.reply.trim() === '[SILENT]' ? '' : state.reply };
+    return fromSaved(saved);
+  }
+  const buttonLabel = job => job && job.runsLine === true ? '▶ RUN LINE' : '▶ RUN AGENT';
+  return { fromSaved, tracker, fromManual, buttonLabel };
+})();
+if (typeof module !== 'undefined' && module.exports) module.exports = RoutineRunResult;
 (() => {
   if (typeof StationUI === 'undefined' || typeof AutomationWindow === 'undefined') return;
   const H = StationUI.h;
@@ -154,7 +198,7 @@
       const nmEl = rowEl && rowEl.querySelector('.mc-top b');
       const nm = (nmEl && nmEl.textContent) || 'routine';
       outEl.hidden = false;
-      outEl.innerHTML = '<div class="rt-out-h">▶ RAN <b>' + esc(nm) + '</b><button class="rt-out-x bb xs" type="button" title="dismiss">✕</button></div><div class="rt-out-b">running…</div>';
+      outEl.innerHTML = '<div class="rt-out-h"><span class="rt-out-state">Starting</span> · <b>' + esc(nm) + '</b><button class="rt-out-x bb xs" type="button" title="dismiss">✕</button></div><div class="rt-out-b">running…</div>';
       if (rowEl) rowEl.insertAdjacentElement('afterend', outEl);
     }
     function positionOut() {
@@ -171,9 +215,9 @@
        REFIT not loaded) -> the plain "runs as" copy: never claim a line the harness can't prove. */
     function runsLine(j) {
       const who = esc(agentLabel(j.agentId || 'agent'));
-      if (j.runsLine !== true) return 'runs as ' + who;
+      if (j.runsLine !== true) return 'runs only ' + who + ' · no automatic handoff';
       const info = (typeof Build !== 'undefined' && Build.lineOfAgentInfo) ? Build.lineOfAgentInfo(j.agentId, j.dockId) : null;   // (multi-bay) the bay it FIRES AT
-      if (!info) return 'runs as ' + who;
+      if (!info) return 'line requested from ' + who + ' · no connected line confirmed';
       return 'runs the <b>' + esc((info.name || 'unnamed').toUpperCase()) + '</b> line from ' + who + ' (' + info.docks + ' dock' + (info.docks === 1 ? '' : 's') + ')';
     }
     /* THE LAST RUN'S SPEND — the routine's own record (`lastUsd`), which for a runsLine routine is the WHOLE
@@ -188,8 +232,8 @@
     }
     function lastResult(j) {
       if (!j.lastRunAt) return '<span class="dim">never run</span>';
-      const ok = j.lastStatus === 'ok';
-      return '<span class="' + (ok ? 'pos' : '') + '"' + (ok ? '' : ' style="color:var(--bad)"') + '>' + (ok ? '✓ ok' : '✕ ' + esc(j.lastReason || 'error')) + '</span> <span class="dim">' + esc(fmtRel(j.lastRunAt)) + '</span>';
+      const result = RoutineRunResult.fromSaved(j), ok = result.kind === 'ok', bad = result.kind === 'error' || result.kind === 'blocked';
+      return '<span class="' + (ok ? 'pos' : bad ? '' : 'dim') + '"' + (bad ? ' style="color:var(--bad)"' : '') + ' title="' + esc(result.detail) + '">' + (ok ? '✓ ' : bad ? '✕ ' : '○ ') + esc(result.label) + '</span> <span class="dim">' + esc(fmtRel(j.lastRunAt)) + '</span>';
     }
     // TICKER HEALTH (scheduler-audit GA-9): armed alone can't prove ticks are completing. GET /api/cron carries a
     // real observed `health` block; render it beside the armed banner. Only meaningful when armed (a disarmed
@@ -305,7 +349,7 @@
         failureStreakLine(j) +
         deliveryLine(j) +
         '<div class="mc-acts">' +
-          '<button class="bb xs" data-act="run"' + (running ? ' disabled title="already running — one run per routine"' : '') + '>▶ RUN NOW</button>' +
+          '<button class="bb xs" data-act="run"' + (running ? ' disabled title="already running — one run per routine"' : '') + '>' + RoutineRunResult.buttonLabel(j) + '</button>' +
           // RESCHEDULE — the same picker, opened on this routine's current schedule. Before this you could
           // only DELETE and re-create a routine to move it an hour, which also threw away its run history.
           '<button class="bb xs" data-act="edit">✎ EDIT TASK</button>' +
@@ -715,6 +759,9 @@
         sfx('click'); btn.disabled = true; const old = btn.textContent; btn.textContent = '… posting line';
         showRunOut(rowEl, id);   // P0 #11: the result panel opens inline right under THIS row (visible ACTIVE pane)
         const ob = outEl.querySelector('.rt-out-b');
+        const heading = outEl.querySelector('.rt-out-state');
+        const setHeading = text => { if (heading) heading.textContent = text; };
+        const requestedLine = (listedJobs.find(j => j.id === id) || {}).runsLine === true;
         /* POST THE LINE FIRST (2026-08-22): with REFIT open the world is frozen, so the sidecar still routes by
            the plan posted at the LAST REFIT close. World.syncPlan() recompiles a dirty floor and resolves on the
            server's verdict; only then does the run dispatch. Mid-edit (REFIT open) a floor with blocking errors
@@ -724,33 +771,57 @@
           const sync = (W && typeof W.syncPlan === 'function') ? await W.syncPlan() : null;
           const editing = (typeof Build !== 'undefined' && Build.isOpen) ? Build.isOpen() : false;
           if (sync && editing && sync.errors && sync.errors.length) {
+            setHeading('Not started');
             ob.innerHTML = '<span style="color:var(--bad)">✕ line not posted — fix the floor first: ' + esc(sync.errors.map(e => (Build && Build.nagLabel) ? Build.nagLabel(e.code) : e.code).filter((v, i, a) => a.indexOf(v) === i).join(' · ')) + '</span>';
             sfx('bad'); btn.disabled = false; btn.textContent = old; return;
           }
           if (sync && (sync.stale || sync.inflight || sync.retryPending)) {
+            setHeading('Not started');
             ob.innerHTML = '<span style="color:var(--bad)">✕ line not posted — sidecar unreachable, the routine was NOT run</span>';
             sfx('bad'); btn.disabled = false; btn.textContent = old; return;
           }
         } catch (_) {}
         btn.textContent = '… running';
+        setHeading(requestedLine ? 'Running line' : 'Running agent');
         try {
           const resp = await post('/api/cron/run', { id });
-          if (!resp.ok || !resp.body) { const e = await resp.json().catch(() => ({})); ob.innerHTML = '<span style="color:var(--bad)">✕ ' + esc((e && e.error) || ('http ' + resp.status)) + '</span>'; sfx('bad'); }
+          if (!resp.ok || !resp.body) { setHeading('Not started'); const e = await resp.json().catch(() => ({})); ob.innerHTML = '<span style="color:var(--bad)">✕ ' + esc((e && e.error) || ('http ' + resp.status)) + '</span>'; sfx('bad'); }
           else {
             // latch the run's OWN runId from the first run.start and key everything to it (mirrors
             // harness.js chat): a forwarded CHILD run's error/tokens riding the same stream must never
             // hijack this run's reply or fail its verdict.
-            const reader = resp.body.getReader(), dec = new TextDecoder(); let sbuf = '', reply = '', err = '', ownRunId = null;
-            const mine = (p) => !p || !p.runId || !ownRunId || p.runId === ownRunId;
+            const reader = resp.body.getReader(), dec = new TextDecoder(), tracker = RoutineRunResult.tracker(); let sbuf = '';
+            const acceptLine = line => {
+              if (!line.trim()) return;
+              try {
+                const event = JSON.parse(line);
+                tracker.accept(event);
+                // A live target name comes from its actual start event, never from
+                // a promised successor in the prompt or a drawn but idle belt.
+                if (requestedLine && event.name === 'agent.run.start' && event.payload && event.payload.agentId) setHeading('Line active · ' + agentLabel(event.payload.agentId));
+              } catch (_) {}
+            };
             for (;;) {
               const r = await reader.read(); if (r.done) break;
               sbuf += dec.decode(r.value, { stream: true });
-              let nl; while ((nl = sbuf.indexOf('\n')) >= 0) { const line = sbuf.slice(0, nl); sbuf = sbuf.slice(nl + 1); if (!line.trim()) continue; try { const e = JSON.parse(line); const p = e.payload || {}; if (e.name === 'agent.run.start' && !ownRunId && p.runId) ownRunId = p.runId; else if (e.name === 'agent.token' && mine(p)) reply += (p.delta || ''); else if (e.name === 'agent.tool_call' && mine(p)) reply = ''; else if (e.name === 'agent.run.error' && mine(p)) err = p.message || 'run error'; } catch (_) {} }
+              let nl; while ((nl = sbuf.indexOf('\n')) >= 0) { const line = sbuf.slice(0, nl); sbuf = sbuf.slice(nl + 1); acceptLine(line); }
             }
-            ob.innerHTML = err ? ('<span style="color:var(--bad)">✕ ' + esc(err) + '</span>') : esc(reply || '(no output)');
-            notify(err ? 'routine run failed' : 'routine ran', err ? 'warn' : 'good');
+            acceptLine(sbuf + dec.decode());
+            // The entry stream is not the line's verdict. Read its matching durable
+            // completion after EOF; an older result or failed read stays unconfirmed.
+            let saved = null;
+            try {
+              const r = await fetch('/api/cron', { cache: 'no-store' });
+              const latest = r.ok ? await r.json() : null;
+              saved = latest && Array.isArray(latest.jobs) ? latest.jobs.find(j => j.id === id) : null;
+            } catch (_) {}
+            const result = RoutineRunResult.fromManual(tracker.state, saved);
+            const bad = result.kind === 'error' || result.kind === 'blocked';
+            setHeading(result.label);
+            ob.innerHTML = '<div' + (bad ? ' style="color:var(--bad)"' : ' class="dim"') + '>' + esc(result.detail) + '</div>' + (result.output ? '<div style="white-space:pre-wrap">' + esc(result.output) + '</div>' : '');
+            notify(result.label, result.kind === 'ok' ? 'good' : bad || result.kind === 'pending' ? 'warn' : '');
           }
-        } catch (e) { ob.innerHTML = '<span style="color:var(--bad)">✕ ' + esc((e && e.message) || 'run failed') + '</span>'; sfx('bad'); }
+        } catch (e) { setHeading('Run incomplete'); ob.innerHTML = '<span style="color:var(--bad)">✕ ' + esc((e && e.message) || 'run failed') + '</span>'; sfx('bad'); }
         btn.disabled = false; btn.textContent = old; refresh();
       }
     });
