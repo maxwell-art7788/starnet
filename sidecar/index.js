@@ -6306,7 +6306,11 @@ const cronDriver = makeCronDriver({
   /* THE WORK LINE for a scheduled fire: run the stages drawn downstream of the routine's dock. Same executor,
      same caps, same per-hop crates as a channel message — only the way a hop is executed differs (a routine has
      no chat transcript; its hops ride the routine's own stream so the session shows the whole line). */
-  advanceChain: (o) => chainRunner.advance({
+  advanceChain: (o) => {
+    if (o.runsLine === true && !router.lineOfAgent(o.agentId, o.dockId ? router.dockOf(o.agentId, o.dockId) : undefined)) {
+      return { text: o.text, stopped: 'the routine entry dock no longer belongs to a work line', hops: [], usd: 0 };
+    }
+    return chainRunner.advance({
     agentId: o.agentId, dockId: o.dockId ? (router.dockOf(o.agentId, o.dockId) || undefined) : undefined, text: o.text, originalText: o.originalText, signal: o.signal,
     // the entry run's reconciled spend: MAX_CHAIN_USD bounds the WHOLE chain, and stage one is part of the
     // chain (2026-08-10 audit — the entry run rode outside its own line's $ ceiling on every path).
@@ -6331,7 +6335,8 @@ const cronDriver = makeCronDriver({
       const hs = { buf: '', errMsg: null, usd: 0 };
       const sink = (name, payload) => {
         const p = payload || {};
-        if (name === 'agent.run.end' && p && p.reason === 'cancelled') hs.stopped = true;   // STOP on this step: the line stops here, never hands its half answer on
+        if (o.onHop) { try { o.onHop(); } catch (_) {} }
+        if (name === 'agent.run.end') hs.reason = p.reason;
         if (name === 'agent.token') { hs.buf += (p.delta || ''); return; }
         if (name === 'agent.tool_call') hs.buf = '';
         if (name === 'agent.run.error') hs.errMsg = p.message || 'run error';
@@ -6367,9 +6372,10 @@ const cronDriver = makeCronDriver({
         });
       } catch (e) { hs.errMsg = hs.errMsg || ('run failed: ' + ((e && e.message) || e)); }
       finally { runsMeta.delete(hopRunId); }
-      return { text: hs.buf, usd: hs.usd, error: hs.errMsg || (hs.stopped ? 'stopped by you' : null) };
+      return cronDriverMod.lineHopResult(hs);
     }
-  })
+    });
+  }
 });
 // A crash can land after markRun durably commits the result/cost/route receipt but before the destination send.
 // Reconcile those pending receipts at boot with the original run id; delivery remains idempotent at local sinks
@@ -12208,18 +12214,17 @@ async function runSampleJob(readArgs) {
        only land on that line's docks, but if resolution ever fell through to a hub fallback the proof
        must fail honestly rather than 200 while claiming a line it never rode. */
     const onLine = !line || entryLineId === line;
-    const completed = onLine && runs.length > 0 && runs.every(r => r.reason === 'done')
-      && !!sampleLineOutcome && !sampleLineOutcome.stopped
-      && router.chainShipsToOutbox(sampleLineOutcome.agentId, sampleLineOutcome.dockId);
+    const verdict = LineJobs.sampleOutcome({ onLine, runs, lineOutcome: sampleLineOutcome,
+      stopped: !!sampleInFlight.stopRequested,
+      shipsToOutbox: !!sampleLineOutcome && router.chainShipsToOutbox(sampleLineOutcome.agentId, sampleLineOutcome.dockId) });
+    const completed = verdict.completed;
     const delivered = completed ? runs[0] : null;
     const totalUsd = runs.reduce((s, r) => s + ((typeof r.usd === 'number' && isFinite(r.usd)) ? r.usd : 0), 0);
     // the job's record takes the route's own verdict: delivered · a problem (steps ran, not all clean) · stopped · failed (nothing ran)
     const jobId = sampleInFlight.jobId || null;
     if (jobId) {
-      const stoppedJob = !!sampleInFlight.stopRequested;
       lineJobsSet(LineJobs.finish(lineJobs, jobId, { at: Date.now(), usd: totalUsd, output: sampleReplies.join(''), runs,
-        status: completed ? 'delivered' : stoppedJob ? 'stopped' : runs.length ? 'problem' : 'failed',
-        error: completed ? '' : stoppedJob ? 'you stopped this job' : !onLine ? 'the job did not enter through this line' : runs.length ? 'a step did not finish cleanly' : 'no step ran' }));
+        status: verdict.status, error: verdict.error }));
       sampleInFlight.jobId = null;
     }
     if (workitemId) {
@@ -12231,10 +12236,8 @@ async function runSampleJob(readArgs) {
       // `line` is echoed only when it was requested, so a line-less POST's answer stays byte-identical.
       // A job the Commander STOPPED (POST /api/routing/sample/stop) is named as a stop — never as a line that failed.
       const stopped = !!sampleInFlight.stopRequested;
-      return json(502, Object.assign({
-        ok: false, sample: true, error: stopped ? 'stopped — you stopped this job before it reached the OUTBOX'
-          : !onLine ? 'sample job did not enter through line "' + line + '"'
-          : runs.length ? 'sample job did not complete cleanly' : 'sample job produced no durable run outcome',
+      return json(verdict.noWork ? 200 : 502, Object.assign({
+        ok: false, sample: true, noWork: verdict.noWork, error: verdict.error,
         chatId: SAMPLE_CHAT, streamId: streamId, agentId: agentId || null, isTask: isTask,
         workitemId: workitemId || null, replies: sampleReplies.slice(), runs: runs, delivered: null, totalUsd: totalUsd
       }, line ? { line: line } : null, stopped ? { stopped: true } : null, jobId ? { jobId } : null));
@@ -14959,9 +14962,17 @@ function handleCronHistory(req, res) {
       const r = rows[i];
       if (!r || !(r.cronJobId === id || (job.lastRunId && r.runId === job.lastRunId))) continue;
       if (out.some(x => x.runId === r.runId)) continue;
-      out.push({ runId: r.runId, at: r.endedAt || r.ts || 0, startedAt: r.startedAt || 0, durationMs: r.durationMs || 0,
+      const historyRow = { runId: r.runId, at: r.endedAt || r.ts || 0, startedAt: r.startedAt || 0, durationMs: r.durationMs || 0,
         reason: r.reason, usd: r.usd || 0, unmetered: !!r.unmetered, toolsOk: r.toolsOk || 0, streamId: r.streamId || '',
-        error: r.error || '', artifacts: (r.artifacts || []).length });
+        error: r.error || '', artifacts: (r.artifacts || []).length, runsLine: job.runsLine === true };
+      // The run store describes the entry agent. Only the matching settled job
+      // record can certify its whole line; never attach the newest result to old runs.
+      if (job.lastRunId && r.runId === job.lastRunId) Object.assign(historyRow, {
+        resultRunId: job.lastRunId, lastStatus: job.lastStatus, lastReason: job.lastReason,
+        lastError: job.lastError, lastLineOutcome: job.lastLineOutcome || null,
+        lastOutput: job.lastStatus === 'ok' || job.lastLineOutcome ? job.lastOutput : null
+      });
+      out.push(historyRow);
     }
     return json(200, { ok: true, id, runs: out });
   } catch (e) { return json(200, { ok: false, error: 'could not read routine history' }); }
@@ -15396,10 +15407,12 @@ async function handleCronRun(req, res) {
        advanceChain seam — without this the SAME routine would run four stages on schedule and one stage
        from the button, which is the precise bug class the slash-command redirect above already exists to
        prevent. Hops stream into the SAME response and the SAME per-run stream, so the session shows the
-       whole line. Runs BEFORE markRun/cron.result below so the recorded outcome is the LINE's, and a chain
-       failure never changes the routine's outcome (state.errMsg is untouched). */
-    if (!state.errMsg && String(state.buf || '').trim()) {
+       whole line. Runs BEFORE markRun/cron.result so partial entry work cannot certify a failed line. */
+    if (job.runsLine === true && !state.errMsg && (!String(state.buf || '').trim() || String(state.buf || '').trim() === cronDriverMod.SILENT_MARKER)) {
+      cronDriverMod.applyLineOutcome(state, {}, job);
+    } else if (!state.errMsg && String(state.buf || '').trim()) {
       try {
+        if (job.runsLine === true && !router.lineOfAgent(job.agentId, job.dockId ? router.dockOf(job.agentId, job.dockId) : undefined)) throw new Error('the routine entry dock no longer belongs to a work line');
         const line = await chainRunner.advance({
           agentId: job.agentId, dockId: job.dockId ? (router.dockOf(job.agentId, job.dockId) || undefined) : undefined,
           text: state.buf, originalText: String(job.prompt || ''), signal: ac.signal,
@@ -15421,8 +15434,10 @@ async function handleCronRun(req, res) {
             const hs = { buf: '', errMsg: null, usd: 0 };
             const hopSink = (name, payload) => {
               try { emit(name, payload); } catch (_) {}
+              const lease = cronDriver.leases.get(job.id);
+              if (lease && lease.runId === runId) lease.heartbeatAt = Date.now();
               const p = payload || {};
-              if (name === 'agent.run.end' && p && p.reason === 'cancelled') hs.stopped = true;   // STOP on this step: the line stops here, never hands its half answer on
+              if (name === 'agent.run.end') hs.reason = p.reason;
               if (name === 'agent.token') hs.buf += (p.delta || '');
               else if (name === 'agent.tool_call') hs.buf = '';
               else if (name === 'agent.run.error') hs.errMsg = p.message || 'run error';
@@ -15458,14 +15473,15 @@ async function handleCronRun(req, res) {
               });
             } catch (e) { hs.errMsg = hs.errMsg || ('run failed: ' + ((e && e.message) || e)); }
             finally { runsMeta.delete(hopRunId); }
-            return { text: hs.buf, usd: hs.usd, error: hs.errMsg || (hs.stopped ? 'stopped by you' : null) };
+            return cronDriverMod.lineHopResult(hs);
           }
         });
-        if (line && String(line.text || '').trim()) state.buf = line.text;
+        if (job.runsLine === true) cronDriverMod.applyLineOutcome(state, line, job);
+        else if (line && String(line.text || '').trim()) state.buf = line.text;
         // THE ROUTINE'S SPEND IS THE WHOLE LINE'S SPEND (2026-08-22): out.usd is hop-only, so add it to the entry
         // run's reconciled spend exactly as the scheduled fire does (cron-driver `state.usd += line.usd`).
-        if (line && typeof line.usd === 'number' && isFinite(line.usd)) state.usd += line.usd;
-      } catch (e) { console.warn('[cron] run-now work line failed after ' + job.agentId + ': ' + ((e && e.message) || e)); }
+        if (job.runsLine !== true && line && typeof line.usd === 'number' && isFinite(line.usd)) state.usd += line.usd;
+      } catch (e) { console.warn('[cron] run-now work line failed after ' + job.agentId + ': ' + ((e && e.message) || e)); if (job.runsLine === true) cronDriverMod.applyLineOutcome(state, null, job, e); }
     }
     runs.delete(runId);
     runsMeta.delete(runId);

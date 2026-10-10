@@ -29,6 +29,20 @@
     if (!L && typeof require === 'function') { try { L = require('./linelayout.js'); } catch (_) { L = null; } }
     return L;
   }
+  function pipelineModule() {
+    let P = (typeof Pipeline !== 'undefined') ? Pipeline : null;
+    if (!P && typeof require === 'function') { try { P = require('./pipeline.js'); } catch (_) { P = null; } }
+    return P;
+  }
+  function foreignRouting(plan, edited) {
+    return (plan.lines || []).filter(l => !(l.propIds || []).some(id => edited.has(id))).map(l => ({
+      id: l.lineId, props: l.propIds.slice().sort(),
+      docks: l.propIds.filter(id => plan.dockChains && plan.dockChains[id]).sort().map(id => ({
+        id, next: (plan.dockChains[id].next || []).slice().sort(),
+        outbox: !!plan.dockChains[id].outbox, gated: !!plan.dockChains[id].gated
+      }))
+    })).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  }
 
   /* ---------- graph helpers ---------- */
   const nodeOf = (g, id) => g.nodes.find(n => n.id === id) || null;
@@ -37,6 +51,24 @@
   const outsOf = (g, id) => g.links.filter(l => l.from.node === id && !isBack(g, l));
   const insOf = (g, id) => g.links.filter(l => l.to.node === id && !isBack(g, l));
   const backsAt = (g, id) => g.links.filter(l => isBack(g, l) && (l.to.node === id || l.from.node === id));
+  // Only a preceding bay with one uninterrupted forward path to THIS gate can
+  // anchor its review span. Branches, other gates and foreign lines are excluded.
+  function loopBackCandidates(g, gateId) {
+    if (!nodeOf(g, gateId) || nodeOf(g, gateId).t !== 'loop') return [];
+    return g.nodes.filter(n => n.t === 'bay' && (() => {
+      let id = n.id; const seen = new Set();
+      while (!seen.has(id)) {
+        seen.add(id);
+        const outs = outsOf(g, id);
+        if (outs.length !== 1) return false;
+        id = outs[0].to.node;
+        if (id === gateId) return true;
+        const next = nodeOf(g, id);
+        if (!next || next.t !== 'bay' || insOf(g, id).length !== 1) return false;
+      }
+      return false;
+    })()).map(n => n.id);
+  }
   const drop = (g, ls) => { g.links = g.links.filter(l => ls.indexOf(l) < 0); };
   // a fresh id for a new machine / link — '+' marks it new (the station numbers it for real when it is laid)
   function fresh(g) {
@@ -184,6 +216,15 @@
       const G = box(g, id('g'), 'loop', o, { cfg: { maxIter: max, when } });
       drop(g, [next]);
       g.links.push(relink(next, R.id), link(id('l'), R.id, G.id), link(id('l'), G.id, next.to.node, 'done'), link(id('l'), G.id, X.id, 'back'));
+      return { ok: true, graph: g, focus: G.id };
+    },
+    setLoopBack(g, a) {
+      const G = nodeOf(g, a.id), target = nodeOf(g, a.target);
+      if (!G || G.t !== 'loop') return fail('NOT_A_LOOP', 'pick a LOOP gate');
+      if (!target || target.t !== 'bay' || !loopBackCandidates(g, G.id).includes(target.id)) return fail('NOT_UPSTREAM', 'choose a preceding step on this line with one forward path to this review gate');
+      const back = g.links.filter(l => l.from.node === G.id && isBack(g, l));
+      if (back.length !== 1) return fail('NOT_SIMPLE', 'this review gate needs exactly one return belt');
+      drop(g, back); g.links.push(relink(back[0], target.id));
       return { ok: true, graph: g, focus: G.id };
     },
     /* ADD A SORTER between two machines (A → B, B a step or the OUTBOX): A → FILTER; CODE work → a new ENGINEER step, RESEARCH
@@ -430,7 +471,25 @@
       if (!(opts && opts.tidy)) return Object.assign(fail('NEEDS_TIDY', 'there is no room for that with the line where it stands — TIDY LINE first, then try again'), { canTidy: true });
       graph = t.graph; L = T; tidied = true;
     }
-    const r = station.applyLineLayout(graph, L);
+    // A successful geometric placement must not merge or reroute another workflow.
+    // Use the station's existing transaction so a refusal also preserves undo/redo.
+    const P = pipelineModule(), edited = new Set(g.graph.nodes.map(n => n.id));
+    const guarded = P && typeof station.projectGeometry === 'function' && typeof station.transact === 'function';
+    const before = guarded ? foreignRouting(P.compileRoutingPlan(station.projectGeometry()), edited) : null;
+    const apply = () => {
+      const r = station.applyLineLayout(graph, L);
+      if (!r || !r.ok || !guarded) return r;
+      const after = foreignRouting(P.compileRoutingPlan(station.projectGeometry()), new Set(Object.values(r.ids || {})));
+      if (JSON.stringify(before) !== JSON.stringify(after)) return fail('OTHER_LINE_CHANGED', 'this edit would change another workflow — move this line to clear floor and try again');
+      if (op === 'setLoopBack') {
+        const geo = station.projectGeometry(), plan = P.compileRoutingPlan(geo);
+        const gate = (geo.props || []).find(p => p.id === ((r.ids && r.ids[args.id]) || args.id));
+        const routed = gate && plan.gateDocks && plan.gateDocks[gate.x + ',' + gate.y];
+        if (!routed || routed.backTo !== ((r.ids && r.ids[args.target]) || args.target)) return fail('RETURN_NOT_ROUTED', 'the return belt did not reach the selected step; the change was rolled back');
+      }
+      return r;
+    };
+    const r = guarded ? station.transact(apply) : apply();
     if (!r || !r.ok) return r || fail('NOT_APPLIED', 'the edit could not be laid');
     return { ok: true, focus: (r.ids && r.ids[e.focus]) || e.focus, ids: r.ids, removed: r.removed || [], relaid, tidied };
   }
@@ -494,5 +553,5 @@
     return OPS[op] ? OPS[op](clone(g.graph), args || {}, opts || {}) : fail('BAD_OP', 'no such edit');
   }
 
-  return { run, check, placeBlueprint, canPlaceBlueprint, OPS, _internals: { why, isBack, outsOf, insOf, layoutNear, armOf, laneAlts, loosen } };
+  return { run, check, placeBlueprint, canPlaceBlueprint, loopBackCandidates, OPS, _internals: { why, isBack, outsOf, insOf, layoutNear, armOf, laneAlts, loosen } };
 });

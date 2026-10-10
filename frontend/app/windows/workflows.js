@@ -161,7 +161,7 @@ const WorkflowsWindow = (() => {
     if (j && j.ok && j.delivered && j.delivered.reason === 'done') { try { if (typeof ReturnStore !== 'undefined' && ReturnStore.foldRow) ReturnStore.foldRow(j.delivered); } catch (_) {} }
     S.out = null;
     if (j && j.jobId) {
-      sfx(j.ok ? 'chime' : 'bad');
+      sfx(j.noWork ? 'click' : j.ok ? 'chime' : 'bad');
       loadJobs();
       // the result opens where the job was sent from; a Commander who moved on finds it in that line's LAST JOBS (and the list row)
       if (S.view === 'line' && S.line === line.key && !S.job) showJob(j.jobId); else schedule();
@@ -562,8 +562,8 @@ const WorkflowsWindow = (() => {
   function jobRows(l) {
     const rows = jobsOf(l.key).slice(0, 8);
     if (S.jobsErr && !rows.length) return '<p class="wfw-note">The job history could not be read — is the station running?</p>';
-    if (!rows.length) return '<p class="wfw-note">No jobs yet. The first one will show here.</p>';
-    const mark = s => ({ delivered: '<span class="wfw-st ok">✓ DONE</span>', running: '<span class="wfw-st run">RUNNING</span>', stopped: '<span class="wfw-st">STOPPED</span>',
+    if (!rows.length) return '<p class="wfw-note">No Send Job runs yet. Scheduled runs are under Schedules → History.</p>';
+    const mark = s => ({ delivered: '<span class="wfw-st ok">✓ DONE</span>', 'no-work': '<span class="wfw-st">NO WORK</span>', running: '<span class="wfw-st run">RUNNING</span>', stopped: '<span class="wfw-st">STOPPED</span>',
       problem: '<span class="wfw-st warn">⚠ PROBLEM</span>', failed: '<span class="wfw-st warn">DIDN’T RUN</span>', interrupted: '<span class="wfw-st warn">INTERRUPTED</span>' })[s] || '';
     return '<div class="wfw-jobs">' + rows.map(j => '<button type="button" class="wfw-jobrow" data-job="' + esc(j.id) + '">' + mark(j.status) + '<span class="wfw-jtext">' + esc(j.text.replace(/\s+/g, ' ').slice(0, 120) || '(no text)') + '</span><span class="wfw-jmeta">' + esc(ago(j.startedAt) + (j.usd ? ' · ' + usd(j.usd) : '')) + '</span></button>').join('') + '</div>';
   }
@@ -592,7 +592,7 @@ const WorkflowsWindow = (() => {
     const took = job.endedAt && job.startedAt ? secs(job.endedAt - job.startedAt) : '';
     const bad = runs.find(r => r.reason && r.reason !== 'done');
     const END = { empty: 'gave no final answer', error: 'hit an error', max_iters: 'ran out of turns', budget: 'hit the spending cap', refusal: 'refused the work', interrupted: 'was interrupted', stopped: 'was stopped' };
-    const head = ok ? '<b class="ok">✓ DONE</b>' : job.status === 'stopped' ? '<b>■ STOPPED</b>' : job.status === 'interrupted' ? '<b class="warn">⚠ INTERRUPTED</b>' : job.status === 'failed' ? '<b class="warn">✕ IT DIDN’T RUN</b>' : '<b class="warn">⚠ FINISHED WITH A PROBLEM</b>';
+    const head = ok ? '<b class="ok">✓ DONE</b>' : job.status === 'no-work' ? '<b>NO WORK PRODUCED</b>' : job.status === 'stopped' ? '<b>■ STOPPED</b>' : job.status === 'interrupted' ? '<b class="warn">⚠ INTERRUPTED</b>' : job.status === 'failed' ? '<b class="warn">✕ IT DIDN’T RUN</b>' : '<b class="warn">⚠ FINISHED WITH A PROBLEM</b>';
     const meta = [runs.length + ' step' + (runs.length === 1 ? '' : 's'), usd(job.usd), took, inOutbox ? 'in the OUTBOX' : ''].filter(Boolean).join(' · ');
     const why = ok ? '' : job.status === 'problem' && bad ? (() => { const p = bad.dockId && st ? st.propById(bad.dockId) : null; return 'The ' + ((p && p.role) ? p.role + ' step' : 'step') + ' (' + NAME(bad.agentId) + ') ' + (END[bad.reason] || String(bad.reason || 'did not finish').replace(/_/g, ' ')) + ', so this job did not finish cleanly. Sending it again often works.'; })()
       : job.status === 'stopped' ? 'You stopped this job. What already ran is counted.' : job.status === 'interrupted' ? 'The station stopped while this job was out. Send it again.' : (job.error || 'Nothing ran.');

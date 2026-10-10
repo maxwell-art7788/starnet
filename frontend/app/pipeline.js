@@ -567,6 +567,7 @@
           if (cEsc && ll.esc === cEsc) escExplicit[key(t.x, t.y)] = true;   // configured: never re-guessed
           // optional verdict tag: re-enter ONLY when the output's tag matches (else every pass loops until max)
           if (typeof p.when === 'string' && /^[A-Za-z0-9_.:-]{1,40}$/.test(p.when)) cfg.when = p.when;
+          if (p.requireApproval === true) { cfg.requireApproval = true; cfg.when = 'approved'; }
           // LOOP_NO_DONE (rule fixed 2026-08-22): an UNSET `done` takes the compiler's own default — the first
           // exit in E,S,W,N order — and that is a working gate, not a finding (every user-drawn loop used to
           // nag). Warn only when NO exit qualifies, or when a configured `done` names a lane that is not an
@@ -1359,7 +1360,7 @@
           const g = gates[k] || {};
           // esc (2026-08-30): the dock the ESCALATION lane reaches (pre-resolved at compile like backTo) —
           // the runner sends a verdict-exhausted crate THERE instead of annotating it onto the done lane
-          return { loop: k, max: j.max || LOOP_MAX_DEFAULT, backTo: gateNode(g.backTo), when: j.when || null, esc: gateNode(g.escTo), next: (nt && map[key(nt.x, nt.y)]) ? walkNode(walk(nt)) : null };
+          return { loop: k, max: j.max || LOOP_MAX_DEFAULT, backTo: gateNode(g.backTo), when: j.when || null, ...(j.requireApproval === true ? { requireApproval: true } : {}), esc: gateNode(g.escTo), next: (nt && map[key(nt.x, nt.y)]) ? walkNode(walk(nt)) : null };
         } else if (j && j.kind === 'split' && j.fanout) {
           /* a lane may lead to an INNER fan-out split (a cascade — how a floor goes wider than 3
              branches): its walk returns { branches }, and dropping that on the floor lost every dock
@@ -1403,7 +1404,7 @@
     if (s.dockId) return { agentId: s.agentId };
     if (s.branches) { const out = []; for (const b of s.branches) { const x = a(b); if (x && out.indexOf(x) < 0) out.push(x); } return { branches: out, split: s.split }; }
     if (s.join) return { join: s.join, expect: s.expect, timeoutMin: s.timeoutMin, next: a(s.next) };
-    if (s.loop) return { loop: s.loop, max: s.max, backTo: a(s.backTo), when: s.when, esc: a(s.esc), next: a(s.next) };
+    if (s.loop) return { loop: s.loop, max: s.max, backTo: a(s.backTo), when: s.when, ...(s.requireApproval === true ? { requireApproval: true } : {}), esc: a(s.esc), next: a(s.next) };
     return s;
   }
   function chainStep(plan, agentId, ctx, pick) {
@@ -1793,8 +1794,8 @@
   const ok = plan => !plan.errors.some(e => !e.warn);   // a plan is deployable iff it has no non-warning errors
 
   /* ---------- LINE COMPONENTS (guided workflows, 2026-08-05) ----------
-     Groups the floor's belt machinery into physical LINES: connected components over belt tiles
-     (4-neighbour adjacency, direction-blind — a lane and its return leg are one line) plus every
+     Groups the floor's belt machinery into LINES: explicit link paths when present, otherwise connected
+     components over belt tiles (4-neighbour adjacency, direction-blind — a lane and its return leg are one line) plus every
      machine (intake/bay/outbox/junction) that touches a component through its footprint + 1-tile
      ring — the exact hookup semantics compileRoutingPlan's passes use. Pure + deterministic
      (no RNG, no clock, inputs unmutated); the finish-the-line card derives its checklist from
@@ -1821,20 +1822,37 @@
   }
   function lineComponents(geo) {
     const props = (geo && geo.props) || [];
-    const map = Array.isArray(geo && geo.links) ? linkedBeltMap(buildBeltMap(geo && geo.belts), props, geo.links) : buildBeltMap(geo && geo.belts);
+    const links = Array.isArray(geo && geo.links) ? geo.links : null;
+    const map = links ? linkedBeltMap(buildBeltMap(geo && geo.belts), props, links) : buildBeltMap(geo && geo.belts);
     const MACH = { intake: 1, bay: 1, outbox: 1, filter: 1, splitter: 1, merger: 1, joiner: 1, loop: 1 };
     // union-find over belt-tile keys
     const parent = {};
     const find = k => { let r = k; while (parent[r] !== r) r = parent[r]; let c = k; while (parent[c] !== r) { const n = parent[c]; parent[c] = r; c = n; } return r; };
     const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; };
     for (const k in map) parent[k] = k;
-    for (const k in map) {
+    if (links) {
+      // Nearby belts can belong to different workflows. Union only the tiles of
+      // an explicit link; a shared endpoint machine joins its own links below.
+      // Junction anchors are not always included in the saved path (including
+      // a zero-length link between adjacent junctions), so include them here.
+      const anchors = {};
+      for (const p of props) if (p && JUNCTION_MACHINE[p.t]) {
+        const a = junctionAnchor(map, p); if (a) anchors[p.id] = key(a.x, a.y);
+      }
+      for (const l of links) {
+        if (!l) continue;
+        const tiles = (Array.isArray(l.path) ? l.path : []).filter(Boolean).map(t => key(t.x, t.y));
+        for (const pid of [l.from && l.from.prop, l.to && l.to.prop]) if (anchors[pid]) tiles.push(anchors[pid]);
+        const present = tiles.filter(k => map[k]);
+        for (let i = 1; i < present.length; i++) union(present[0], present[i]);
+      }
+    } else for (const k in map) {
       const p = k.split(','), x = +p[0], y = +p[1];
       for (const d of LANE_ORDER) { const v = DIRV[d], nk = key(x + v[0], y + v[1]); if (map[nk]) union(k, nk); }
     }
     // a machine joins (and can BRIDGE) every component its footprint+ring touches — on a LINKED floor, only the ring
     // tiles its own links run over (a junction also stands on its own tile): a belt passing the ring is another line
-    const own = Array.isArray(geo && geo.links) ? linkTilesByProp(geo.links) : null;
+    const own = links ? linkTilesByProp(links) : null;
     const propTiles = {};   // propId -> [belt keys]
     for (const pr of props) {
       if (!MACH[pr.t]) continue;

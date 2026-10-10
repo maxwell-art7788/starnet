@@ -1102,3 +1102,9 @@ test/prose-links-desktop.test.js
 test/comms-receipts-count.test.js
 test/rail-agent-empty-archived.test.js
 test/run-stop-handles.test.js
+test/routine-run-result.test.js
+test/cron.line-outcome.test.js
+test/pipeline.link-components.test.js
+test/linejobs.outcome.test.js
+test/workflow.review-span.test.js
+test/loop.file-images.test.js

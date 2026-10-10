@@ -496,7 +496,7 @@ const WorkflowPanel = (() => {
      edit of the line's graph, laid out by the engine and written back in one UNDO slot (H.lineEdit → LineEdit). A button whose
      edit could only fail is shown OFF with the reason as its tip — never a click that ends in an error. */
   const canEdit = (op, id, args) => (H && H.canLineEdit) ? (H.canLineEdit(op, id, args) || { ok: false }) : { ok: false, msg: 'this station cannot edit lines' };
-  const EDIT_DONE = { insertStep: 'step added', appendStep: 'step added', addBranch: 'branch added', addLoop: 'review added', addSorter: 'sorter added',
+  const EDIT_DONE = { insertStep: 'step added', appendStep: 'step added', addBranch: 'branch added', addLoop: 'review added', setLoopBack: 'revision target changed', addSorter: 'sorter added',
     removeStep: 'step removed', removeLoop: 'review removed', moveStep: 'step moved', tidy: 'line tidied', addOutbox: 'OUTBOX added', wrapLine: 'line made',
     addArm: 'branch added', removeArm: 'branch removed', addRoute: 'route added', removeSorter: 'sorter removed' };
   /* NO ROOM WHERE THE LINE STANDS (the edit would fit with the line laid out afresh): the button ARMS in place — its label says
@@ -1297,6 +1297,12 @@ const WorkflowPanel = (() => {
   }
 
   /* ===== LOOP / JOINER gates — the same configureJunction path, the same compiled-plan labels ===== */
+  function currentLoopBackTarget(graph, loopId) {
+    // Saved return links use the ordinary "out" port; only DONE and ESC are
+    // special. Match the line editor/compiler's return-lane rule.
+    const back = graph && graph.links.find(l => l.from.node === loopId && l.from.port !== 'done' && l.from.port !== 'esc');
+    return back ? back.to.node : '';
+  }
   function paintGate(body, f, p) {
     const isJoiner = p.t === 'joiner', isLoop = p.t === 'loop';
     const jnField = (id, label, min, max, step, val, ph) => '<label class="refit-field lb-field" for="' + id + '">' + label
@@ -1305,27 +1311,34 @@ const WorkflowPanel = (() => {
     const loopMaxDef = (typeof Pipeline !== 'undefined' && Pipeline.LOOP_MAX_DEFAULT) || 5;
     const loopMaxCeil = (typeof Pipeline !== 'undefined' && Pipeline.LOOP_MAX_CEILING) || 20;
     const loopDoneCur = (p.done && loopExits.some(x => x.dir === p.done)) ? p.done : (loopExits[0] ? loopExits[0].dir : null);
+    const graphRead = isLoop && H.station().lineGraph ? H.station().lineGraph(p.id) : null;
+    const graph = graphRead && graphRead.ok ? graphRead.graph : null;
+    const backCurrent = currentLoopBackTarget(graph, p.id);
+    const backChoices = graph && typeof LineEdit !== 'undefined' ? LineEdit.loopBackCandidates(graph, p.id) : [];
     const joinerHtml = isJoiner
       ? '<section class="wf-sec"><h3><span class="n">JOINER</span>How long should it wait?</h3><div class="wf-mode">' + (H.machineDiagram ? H.machineDiagram('joiner') : '') + '<p>Work waits here for <b>every</b> branch of the same job, then continues as <b>one combined result</b>. (A MERGER is different: it only lets belts share one, nothing waits.)</p></div>'
         + jnField('jn-timeout', 'minutes to wait for a late branch', 1, 120, 1, p.timeoutMin ? String(p.timeoutMin) : '', '10')
         + '<div class="wf-help" id="jn-note">If a part is late, the available results continue without it, marked PARTIAL. Leave blank for 10 minutes. Choose 1–120 minutes.</div></section>'
       : '';
     const loopHtml = isLoop
-      ? '<section class="wf-sec"><h3><span class="n">LOOP</span>Where should finished work go?</h3><div class="wf-mode">' + (H.machineDiagram ? H.machineDiagram('loop') : '') + '<p>The loop sends work <b>back</b> to an earlier step for another pass, until the reviewer approves it or the passes run out, then sends it <b>on</b>.</p></div>'
+      ? '<section class="wf-sec"><h3><span class="n">LOOP</span>Where should finished work go?</h3><div class="wf-mode">' + (H.machineDiagram ? H.machineDiagram('loop') : '') + '<p>The loop sends revisions <b>back</b> to an earlier step. Choose whether work must be approved before it can move on.</p></div>'
         + (loopExits.length
             ? '<div class="wf-chips loop-exits" id="loop-exits">' + loopExits.map(x => '<button type="button" class="bb sm loop-exit' + (x.dir === loopDoneCur ? ' active' : '') + '" data-dir="' + x.dir + '">' + esc(x.label) + '</button>').join('') + '</div>'
               + '<div class="wf-help" id="loop-back">' + esc(H.loopBackTxt(loopExits, loopDoneCur)) + '</div>'
             : '<div class="wf-warnline">Add two outgoing belts first: one to the next step and one back to an earlier BAY.</div>')
+        + (backChoices.length ? '<label class="refit-field" for="loop-back-target">Return revisions to<select id="loop-back-target" class="key-input">' + backChoices.map(id => '<option value="' + esc(id) + '"' + (id === backCurrent ? ' selected' : '') + '>' + esc(dockLabel(f, id)) + '</option>').join('') + '</select></label>'
+          + editBtn('setLoopBack', p.id, { id: p.id, target: backCurrent || backChoices[0] }, 'SET REVISION TARGET', 'reconnect the return belt to this preceding step; one UNDO') : '')
         + '</section><section class="wf-sec"><h3>Limit the number of attempts</h3>'
-        + jnField('loop-max', 'MAX PASSES', 1, loopMaxCeil, 1, p.maxIter ? String(p.maxIter) : '', String(loopMaxDef))
-        + '<p class="wf-help">A pass is one attempt. The line stops repeating when it reaches this limit.</p></section>'
+        + jnField('loop-max', 'MAX REVISION PASSES', 1, loopMaxCeil, 1, p.maxIter ? String(p.maxIter) : '', String(loopMaxDef))
+        + '<p class="wf-help">This many returns to the selected step are allowed after the initial review.</p>'
+        + '<label class="rt-term"><input type="checkbox" id="loop-require-approval"' + (p.requireApproval === true ? ' checked' : '') + '> Require approval before continuing</label><p class="wf-help">When enabled, only VERDICT: approved continues. At the revision limit the line stops; neither DONE nor the escalation lane receives unapproved work. When disabled, the existing exhaustion route applies.</p></section>'
         + '<section class="wf-sec"><h3>When should it stop repeating?</h3><p class="wf-help">Choose the reviewer’s verdict that lets work move on. Ask the reviewer to end with <b>VERDICT: approved</b> or <b>VERDICT: revise</b> — the REVIEWER starters already do.</p>'
         + '<div class="wf-chips loop-when-row">' + [['approved', 'APPROVED'], ['revise', 'REVISE']].map(([tag, lbl]) => '<button type="button" class="bb sm loop-when loop-verdict' + (p.when === tag ? ' sel' : '') + '" data-tag="' + tag + '">' + lbl + '</button>').join('') + '</div>'
         + '<details class="wf-more"' + (p.when && p.when !== 'approved' && p.when !== 'revise' ? ' open' : '') + '><summary>Repeat based on content instead</summary>'
         + '<p class="wf-help">Repeat while the result matches this type. Other results move on.</p><div class="wf-chips loop-when-row">'
         + [['code', 'CODE'], ['research', 'RESEARCH'], ['general', 'GENERAL']].map(([tag, lbl]) => '<button type="button" class="bb sm loop-when' + (p.when === tag ? ' sel' : '') + '" data-tag="' + tag + '">' + lbl + '</button>').join('')
         + '</div></details>'
-        + '<div class="wf-help" id="loop-note">' + esc(H.loopRuleTxt(p.when, p.maxIter || loopMaxDef)) + ' Blank max = ' + loopMaxDef + '.</div></section>'
+        + '<div class="wf-help" id="loop-note">' + esc(p.requireApproval === true ? 'Continues only after approval; stops if revision passes run out.' : H.loopRuleTxt(p.when, p.maxIter || loopMaxDef)) + ' Blank max = ' + loopMaxDef + '.</div></section>'
         + (H.lineEdit ? '<section class="wf-sec wf-shape"><h3>Shape the line</h3><div class="wf-chips">'
           + editBtn('removeLoop', p.id, { id: p.id }, '✕ REMOVE THE REVIEW', 'the LOOP gate and the REVIEWER it came with go; the step they reviewed hands straight on')
           + '</div></section>' : '')
@@ -1333,9 +1346,9 @@ const WorkflowPanel = (() => {
     body.innerHTML = joinerHtml + loopHtml;
     wireEdits(body);
     const jnTimeout = $('#jn-timeout'), jnNote = $('#jn-note');
-    const loopMax = $('#loop-max'), loopNote = $('#loop-note'), loopBackEl = $('#loop-back');
+    const loopMax = $('#loop-max'), loopNote = $('#loop-note'), loopBackEl = $('#loop-back'), requireApproval = $('#loop-require-approval');
     const gate = { done: loopDoneCur, when: p.when || null };
-    let gateSaved = JSON.stringify(isJoiner ? { timeoutMin: p.timeoutMin || null } : { maxIter: p.maxIter || null, done: p.done || null, when: p.when || null });
+    let gateSaved = JSON.stringify(isJoiner ? { timeoutMin: p.timeoutMin || null } : { maxIter: p.maxIter || null, done: p.done || null, when: p.when || null, requireApproval: p.requireApproval === true });
     const saveGate = () => {
       if (!prop(p.id) || typeof H.station().configureJunction !== 'function') return;
       const cfg = {};
@@ -1344,17 +1357,18 @@ const WorkflowPanel = (() => {
         const v = +String((loopMax && loopMax.value) || '').trim(); if (isFinite(v) && v >= 1) cfg.maxIter = Math.min(loopMaxCeil, Math.floor(v));
         if (gate.done) cfg.done = gate.done;
         if (gate.when) cfg.when = gate.when;
+        if (requireApproval && requireApproval.checked) { cfg.requireApproval = true; cfg.when = 'approved'; }
       }
       const res = H.station().configureJunction(p.id, Object.keys(cfg).length ? cfg : null);
       if (!res || !res.ok) { H.sfx('bad'); return; }
       if (jnTimeout) jnTimeout.value = res.timeoutMin ? String(res.timeoutMin) : '';
       if (loopMax) loopMax.value = res.maxIter ? String(res.maxIter) : '';
-      const next = JSON.stringify(isJoiner ? { timeoutMin: res.timeoutMin || null } : { maxIter: res.maxIter || null, done: res.done || null, when: res.when || null });
+      const next = JSON.stringify(isJoiner ? { timeoutMin: res.timeoutMin || null } : { maxIter: res.maxIter || null, done: res.done || null, when: res.when || null, requireApproval: res.requireApproval === true });
       if (next === gateSaved) return;
       gateSaved = next; H.sfx('click');
       const said = isJoiner
         ? (res.timeoutMin ? '✓ saved — waits ' + res.timeoutMin + ' min, then releases partial' : '✓ saved — station default (10 min), then releases partial')
-        : '✓ saved — ' + H.loopRuleTxt(res.when, res.maxIter || loopMaxDef) + (res.done ? ' DONE on ' + res.done + '.' : '');
+        : res.requireApproval ? '✓ saved — continues only after approval; stops if revision passes run out.' : '✓ saved — ' + H.loopRuleTxt(res.when, res.maxIter || loopMaxDef) + (res.done ? ' DONE on ' + res.done + '.' : '');
       if (isJoiner && jnNote) jnNote.textContent = said;
       if (isLoop && loopNote) loopNote.textContent = said;
       // THE WRONG DONE LANE IS A CYCLE: said HERE, on the field that caused it, with the lane that fixes it
@@ -1365,6 +1379,12 @@ const WorkflowPanel = (() => {
       H.flashTip(isJoiner ? 'joiner timeout saved' : 'loop gate saved', true);
     };
     el._saveGate = saveGate;
+    const backSelect = $('#loop-back-target');
+    if (backSelect) backSelect.onchange = () => {
+      const b = body.querySelector('[data-edit="setLoopBack"]');
+      if (b) { b.dataset.editArgs = JSON.stringify({ id: p.id, target: backSelect.value }); disarmBtn(b); }
+    };
+    if (requireApproval) requireApproval.onchange = () => { if (requireApproval.checked) gate.when = 'approved'; saveGate(); paint(true); };
     for (const n of [jnTimeout, loopMax]) {
       if (!n) continue;
       n.addEventListener('blur', saveGate);
@@ -1377,6 +1397,7 @@ const WorkflowPanel = (() => {
       saveGate();
     });
     $$('.loop-when').forEach(b => b.onclick = () => {
+      if (requireApproval && requireApproval.checked) { H.flashTip('Approval is required. Turn that option off to use another loop rule.', false); return; }
       gate.when = (gate.when === b.dataset.tag) ? null : b.dataset.tag;   // click again to clear
       $$('.loop-when').forEach(x => x.classList.toggle('sel', x.dataset.tag === gate.when));
       saveGate();
@@ -1453,6 +1474,14 @@ const WorkflowPanel = (() => {
     }[p.t] || [String(p.t).toUpperCase(), 'Part of the line', 'Connections are made with the BELT tool.'];
     body.innerHTML = '<section class="wf-sec workflow-no-settings"><h3><span class="n">' + esc(TXT[0]) + '</span>' + esc(TXT[1]) + '</h3><p class="wf-help">' + esc(TXT[2]) + '</p>'
       + '<p class="wf-help dim">No extra settings needed — the belts you draw decide the paths.</p></section>';
+    if (p.t === 'outbox' && H.lineEdit && H.station().lineGraph) {
+      const gr = H.station().lineGraph(p.id), incoming = gr && gr.ok ? gr.graph.links.filter(l => l.to.node === p.id) : [];
+      if (incoming.length === 1) {
+        body.innerHTML += '<section class="wf-sec"><h3>Add a final stage</h3><p class="wf-help">Add a packaging or listing-copy step before this OUTBOX.</p>'
+          + editBtn('insertStep', p.id, { from: incoming[0].from.node, to: p.id, role: 'WRITER' }, 'ADD FINAL STAGE', 'insert a step on the final belt, including a loop’s DONE lane; one UNDO') + '</section>';
+        wireEdits(body);
+      }
+    }
   }
   function paintFilter(body, f, p) {
     const info = H.junctionInfo ? H.junctionInfo(p.id) : null, lanes = (info && info.lanes) || [];
@@ -1675,7 +1704,7 @@ const WorkflowPanel = (() => {
     const v = mine && mine.view; if (!v) return '';
     const runs = (mine.runs || []).slice().reverse();   // line order (the server lists the newest first)
     // STOPPED by the Commander, or REFUSED before any step ran: the server's own verdict card, as before
-    if (v.stopped || (!v.ok && !runs.length)) return '<div class="wf-sample-res">' + H.sampleHTML(v) + '</div>';
+    if (v.noWork || v.stopped || (!v.ok && !runs.length)) return '<div class="wf-sample-res">' + H.sampleHTML(v) + '</div>';
     const P = typeof Pipeline !== 'undefined' ? Pipeline : null, out = String(mine.output || '');
     const ln = loopNotes(P && P.stripVerdictLine ? P.stripVerdictLine(out) : out), shown = ln.rest;   // a reviewer's VERDICT line and the loop's note steer the line; they are not the work
     const prev = S.prevJob && S.prevJob.stamp !== mine.stamp && S.prevJob.text === mine.text ? S.prevJob : null;

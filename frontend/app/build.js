@@ -3396,10 +3396,11 @@ const Build = (() => {
     const last = replies.length ? String(replies[replies.length - 1] || '') : '';
     const clean = last.replace(/\s+/g, ' ').trim();
     const reply = clean.length > 80 ? clean.slice(0, 80) + '…' : clean;
-    const ok = !!r.ok && !!r.delivered;
+    const noWork = r.noWork === true;
+    const ok = !noWork && !!r.ok && !!r.delivered;
     const reason = ok ? null : (r.error ? String(r.error) : ('sample refused (HTTP ' + (status == null ? '?' : status) + ')'));
     // stopped: the SERVER's word that the Commander stopped this job (POST /api/routing/sample/stop) — never the click's
-    return { ok: ok, stages: stages, usd: usd, reply: reply, reason: reason, stopped: !ok && r.stopped === true };
+    return { ok: ok, noWork: noWork, stages: stages, usd: usd, reply: clean === '[SILENT]' ? '' : reply, reason: reason, stopped: !ok && r.stopped === true };
   }
   /* REFIT-JUNCTION-PURE-END */
   function openFlowCard(propId) {
@@ -4167,6 +4168,9 @@ const Build = (() => {
   let finSampleRes = null;   // { key, stamp, pending } | { key, stamp, view }
   function finSampleHTML(v) {
     if (!v) return '';
+    if (v.noWork) return '<div class="fl-result"><div><span class="fl-result-k">NO WORK PRODUCED</span> ' + esc(v.reason || 'No result was delivered to the OUTBOX.') + '</div>'
+      + (v.stages.length ? '<div><span class="fl-result-k">RAN</span> ' + esc(v.stages.join(' ▸ ')) + '</div>' : '')
+      + (v.usd != null ? '<div><span class="fl-result-k">COST</span> $' + esc(v.usd.toFixed(4)) + '</div>' : '') + '</div>';
     // a STOPPED job is the Commander's own act, not a refusal: it says so, with what already ran and what it cost
     if (v.stopped) return '<div class="fl-result stopped"><div><span class="fl-result-k">STOPPED</span> ' + esc(String(v.reason || '').replace(/^stopped\s*[—-]\s*/i, '') || 'you stopped this job') + '</div>'
       + (v.stages.length ? '<div><span class="fl-result-k">RAN</span> ' + esc(v.stages.join(' ▸ ')) + '</div>' : '')
@@ -4215,7 +4219,7 @@ const Build = (() => {
       if (view.ok && response && response.delivered && response.delivered.reason === 'done') { try { if (typeof ReturnStore !== 'undefined' && ReturnStore.foldRow) folded = !!ReturnStore.foldRow(response.delivered); } catch (_) {} }
       finSampleRes = { key, stamp: Date.now(), view, exampleSignature:options.exampleSignature, output: Array.isArray(response?.replies) ? response.replies.join('') : '',
         runs: Array.isArray(response?.runs) ? response.runs : [], streamId: response?.streamId || null, folded, text: options.text || '' };
-      finSig = ''; if (running) renderFinCard(); options.onUpdate?.(); sfx(view.ok ? 'chime' : 'bad');
+      finSig = ''; if (running) renderFinCard(); options.onUpdate?.(); sfx(view.noWork ? 'click' : view.ok ? 'chime' : 'bad');
     };
     const bad = reason => ({ ok: false, stages: [], usd: null, reply: '', reason });
     finPlanGate(c).then(gate => {

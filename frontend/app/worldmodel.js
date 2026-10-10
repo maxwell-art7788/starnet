@@ -90,6 +90,7 @@ const WorldModel = (() => {
     const done = cleanDir(src.done); if (done) dst.done = done;
     const esc = cleanDir(src.esc); if (esc) dst.esc = esc;   // LOOP escalation lane (2026-08-30)
     if (typeof src.when === 'string' && /^[A-Za-z0-9_.:-]{1,40}$/.test(src.when)) dst.when = src.when;
+    if (src.requireApproval === true) { dst.requireApproval = true; dst.when = 'approved'; }
     return dst;
   }
 
@@ -945,7 +946,7 @@ const WorldModel = (() => {
         if (p.routes) o.routes = p.routes; if (p.def) o.def = p.def; if (p.done) o.done = p.done;
         props.push(o);
         const g = Object.assign({}, o);
-        if (p.agentId) g.agentId = p.agentId; if (p.when) g.when = p.when; if (p.maxIter) g.maxIter = p.maxIter; if (p.timeoutMin) g.timeoutMin = p.timeoutMin;
+        if (p.agentId) g.agentId = p.agentId; if (p.when) g.when = p.when; if (p.maxIter) g.maxIter = p.maxIter; if (p.timeoutMin) g.timeoutMin = p.timeoutMin; if (p.requireApproval === true) g.requireApproval = true;
         geoProps.push(g);
       }
       for (const k in doc.belts) { const q = k.split(','); belts.push({ x: +q[0], y: +q[1], dir: doc.belts[k] }); }
@@ -2117,7 +2118,7 @@ const WorldModel = (() => {
       const P = pipelineModule();
       if (!P || typeof P.deriveLinks !== 'function') return fail('NO_COMPILER', 'the line compiler is not loaded');
       const ov = (opts && typeof opts === 'object') ? opts : {};
-      const CFG = ['routes', 'def', 'bufferSize', 'timeoutMin', 'maxIter', 'done', 'esc', 'when'];
+      const CFG = ['routes', 'def', 'bufferSize', 'timeoutMin', 'maxIter', 'done', 'esc', 'when', 'requireApproval'];
       const nodes = bp.props.map((sp, i) => {
         const n = { id: 'b' + i, t: sp.t, w: sp.w || 1, h: sp.h || 1 };
         if (sp.block === false) n.block = false;
@@ -2886,7 +2887,7 @@ const WorldModel = (() => {
         if (p.t === 'intake' && p.projectRoot) lp.projectRoot = p.projectRoot;
         if (p.limits) lp.limits = p.limits;   // an INTAKE's LINE BUDGET -> the compiled plan (pipeline normalizes; chain executor reads)
         if (p.routes) lp.routes = p.routes; if (p.def) lp.def = p.def; if (p.bufferSize) lp.bufferSize = p.bufferSize;   // junction config -> the bake/pipeline
-        if (p.timeoutMin) lp.timeoutMin = p.timeoutMin; if (p.maxIter) lp.maxIter = p.maxIter; if (p.done) lp.done = p.done; if (p.when) lp.when = p.when;   // joiner / loop gate config
+        if (p.timeoutMin) lp.timeoutMin = p.timeoutMin; if (p.maxIter) lp.maxIter = p.maxIter; if (p.done) lp.done = p.done; if (p.when) lp.when = p.when; if (p.requireApproval === true) lp.requireApproval = true;   // joiner / loop gate config
         if (p.door) lp.door = p.door;   // an AIRLOCK's seal state -> the prop sprite's status light / jam spark
         if (p.connectorId) lp.connectorId = p.connectorId;   // a CONNECTOR PORTAL's bound server -> live state + firing pulse on the sprite
         if (p.pluginId) lp.pluginId = p.pluginId;            // a PLUGIN TERMINAL's bound plugin -> the click opens that plugin's window
@@ -3140,7 +3141,7 @@ const WorldModel = (() => {
       if (!p) return fail('NOT_FOUND', 'no such prop');
       const linkedNow = Array.isArray(currentLinks());
       snapshot();
-      delete p.routes; delete p.def; delete p.bufferSize; delete p.timeoutMin; delete p.maxIter; delete p.done; delete p.when;   // replace wholesale
+      delete p.routes; delete p.def; delete p.bufferSize; delete p.timeoutMin; delete p.maxIter; delete p.done; delete p.when; delete p.requireApproval;   // replace wholesale
       if (cfg) applyJunctionCfg(p, cfg);
       // a linked floor: the junction's out-links carry what the new config routes down their lanes (links are what the
       // compiler reads — a route set in the panel must land on the link it names)
@@ -3149,7 +3150,7 @@ const WorldModel = (() => {
         if (lanes.length) doc.links = doc.links.map(l => { const o = lanes.find(q => q.link === l); return o ? Object.assign({}, l, { from: junctionPort(p, o.dir) }) : l; });
       }
       emit([{ x1: p.x, y1: p.y, x2: p.x + (p.w || 1) - 1, y2: p.y + (p.h || 1) - 1 }]);
-      return { ok: true, id: propId, routes: p.routes || null, def: p.def || null, bufferSize: p.bufferSize || null, timeoutMin: p.timeoutMin || null, maxIter: p.maxIter || null, done: p.done || null, when: p.when || null };
+      return { ok: true, id: propId, routes: p.routes || null, def: p.def || null, bufferSize: p.bufferSize || null, timeoutMin: p.timeoutMin || null, maxIter: p.maxIter || null, done: p.done || null, when: p.when || null, requireApproval: p.requireApproval === true };
     }
     // bind/clear the connectorId on a CONNECTOR PORTAL — WHICH MCP server this gateway grants (per-instance).
     // A blank id unbinds (the portal grants nothing until bound; bayObjects emits it only when bound). Mirrors
