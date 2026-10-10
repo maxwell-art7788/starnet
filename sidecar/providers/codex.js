@@ -329,7 +329,7 @@
 
       try {
         let sawSentinel = false;                     // the `data: [DONE]` end-of-stream marker
-        while (!sawSentinel) {
+        while (!sawSentinel && !doneEmitted) {
           const { value, done } = await reader.read();
           if (done) break;
           buf += dec.decode(value, { stream: true });
@@ -340,9 +340,12 @@
             if (!p) continue;
             if (p.done) { sawSentinel = true; break; }
             yield* emitFrom(p.json);
+            // Responses completion is authoritative even if the HTTP body stays open or sends
+            // keepalives. Waiting for EOF here strands an already-finished run and its follow-ups.
+            if (doneEmitted) break;
           }
         }
-        if (!sawSentinel) {
+        if (!sawSentinel && !doneEmitted) {
           buf += dec.decode();
           if (buf.trim()) {
             const p = parseLine(buf);
@@ -359,6 +362,10 @@
       } catch (e) {
         if (isAbort(e, req.signal)) return;
         throw e;
+      } finally {
+        // Release the body on terminal events and consumer cancellation. Do not await a remote
+        // cancel promise: cleanup must not become another unbounded wait after completion.
+        try { const pending = reader.cancel(); if (pending && typeof pending.catch === 'function') pending.catch(() => {}); } catch (_) {}
       }
     }
 
