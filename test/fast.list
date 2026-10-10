@@ -1107,3 +1107,4 @@ test/cron.line-outcome.test.js
 test/pipeline.link-components.test.js
 test/linejobs.outcome.test.js
 test/workflow.review-span.test.js
+test/loop.file-images.test.js

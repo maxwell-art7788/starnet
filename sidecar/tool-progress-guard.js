@@ -10,6 +10,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const path = require('node:path');
 
 const BROWSER_ACTION_RE = /^browser\.(?:attach|back|click|detach|dialog|drag|emulate|eval|forward|hover|intercept|navigate|press|scroll|select|tab_select|tab_close|type|upload|viewport)$/;
 const BROWSER_OBSERVE_RE = /^browser\.(?:snapshot|get_text|find|wait|console|network|inspect|tabs|test_state|test_snapshot)$/;
@@ -47,6 +48,28 @@ function routeOf(name) {
   return name || 'unknown';
 }
 
+/* A stale read of one local file is not evidence that every file in the workspace is stale. In particular,
+   revisiting several page previews must not prevent reading a different preview or a just-written report.
+   This is only lexical bookkeeping, not path authority: dispatch still resolves/jails each target. It does
+   not equate relative/absolute paths, symlinks or filesystem aliases. Never surface a target in decisions. */
+function normalizedReadPath(value, platform) {
+  if (typeof value !== 'string' || !value) return '';
+  const windows = (platform || process.platform) === 'win32';
+  const normalized = (windows ? path.win32 : path.posix).normalize(value);
+  return windows ? normalized.toLowerCase() : normalized;
+}
+
+function progressRoute(call) {
+  const route = routeOf(call && call.name);
+  if (!call || call.name !== 'fs.read') return route;
+  let args = call.args;
+  if (!args || typeof args !== 'object') {
+    try { args = JSON.parse(call.argsRaw || '{}'); } catch (_) { args = {}; }
+  }
+  const target = normalizedReadPath(args && args.path);
+  return target ? route + ':file:' + digest(target) : route;
+}
+
 function trackable(call, tool) {
   const name = String((call && call.name) || '');
   // code.run is a read-scoped composition container. Its nested calls re-enter central dispatch and are the
@@ -71,7 +94,16 @@ function evidenceKey(call, result) {
   const hostKey = r.progress && typeof r.progress.key === 'string' ? r.progress.key : '';
   const body = normalizeEvidence(r.content);
   const summary = normalizeEvidence(r.summary || (r.isError ? 'error' : 'ok'));
-  return digest(routeOf(call && call.name) + '\0' + hostKey + '\0' + summary + '\0' + body);
+  // Image descriptions contain only dimensions/rounded byte counts. Different pixels with the same label
+  // are new evidence too. Hash inline bytes privately; URLs and caller-controlled image metadata are not
+  // evidence of changed pixels. This does not certify that a provider actually displayed an image.
+  const pixels = (call && call.name === 'fs.read' && Array.isArray(r.images) ? r.images : [])
+    .filter(img => img && typeof img.data === 'string' && img.data)
+    .map(img => digest(img.data)).join('\0');
+  // fs.read describes the caller's path spelling. A ./ alias or Windows case change must not manufacture
+  // progress for identical image bytes; the normalized resource and pixels already identify that evidence.
+  const evidenceBody = call && call.name === 'fs.read' && pixels ? '' : body;
+  return digest(progressRoute(call) + '\0' + hostKey + '\0' + summary + '\0' + evidenceBody + '\0' + pixels);
 }
 
 function makeToolProgressGuard(options) {
@@ -84,11 +116,12 @@ function makeToolProgressGuard(options) {
   const exact = new Map();
   const routes = new Map();
 
-  function routeState(route) {
-    let state = routes.get(route);
+  function routeState(call) {
+    const key = progressRoute(call);
+    let state = routes.get(key);
     if (!state) {
-      state = { stale: 0, warned: false, probe: false };
-      routes.set(route, state);
+      state = { route: routeOf(call && call.name), stale: 0, warned: false, probe: false };
+      routes.set(key, state);
     }
     return state;
   }
@@ -113,7 +146,7 @@ function makeToolProgressGuard(options) {
         'This exact tool call has already returned the same result ' + same.count + ' times. It is blocked because repeating it cannot add evidence. Change the arguments or use a different strategy.');
     }
 
-    const state = routeState(routeOf(call.name));
+    const state = routeState(call);
     if (observation(call, tool) && state.stale >= routeBlockAfter) {
       if (state.probe) {
         state.probe = false;
@@ -127,8 +160,7 @@ function makeToolProgressGuard(options) {
 
   function after(call, result, tool) {
     if (!trackable(call, tool)) return publicDecision('allow', 'untracked', call, 0, '');
-    const route = routeOf(call.name);
-    const state = routeState(route);
+    const state = routeState(call);
     const key = evidenceKey(call, result);
     const novel = !evidence.has(key);
     if (novel) {
@@ -164,7 +196,7 @@ function makeToolProgressGuard(options) {
     return publicDecision('allow', novel ? 'new_evidence' : 'no_new_evidence', call, state.stale, '');
   }
 
-  return { before, after, snapshot: () => ({ evidence: evidence.size, routes: Array.from(routes.entries()).map(([route, state]) => ({ route, stale: state.stale })) }) };
+  return { before, after, snapshot: () => ({ evidence: evidence.size, routes: Array.from(routes.values()).map(state => ({ route: state.route, stale: state.stale })) }) };
 }
 
-module.exports = { makeToolProgressGuard, _internals: { normalizeEvidence, routeOf, trackable, observation, action, evidenceKey, canonicalArgs } };
+module.exports = { makeToolProgressGuard, _internals: { normalizeEvidence, routeOf, trackable, observation, action, evidenceKey, canonicalArgs, normalizedReadPath } };
