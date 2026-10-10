@@ -1,6 +1,9 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const view = require('../frontend/app/windows/routines.js');
 
 const saved = patch => Object.assign({ lastRunId: 'entry-1', lastStatus: 'ok', lastReason: 'done', lastOutput: 'Actual output' }, patch);
@@ -83,4 +86,50 @@ test('an error terminal is not erased by a duplicate done event', () => {
 test('Run labels expose explicit whole-line opt-in only', () => {
   assert.equal(view.buttonLabel({ runsLine: true }), '▶ RUN LINE');
   for (const job of [{}, { runsLine: false }, { runsLine: 'true' }]) assert.equal(view.buttonLabel(job), '▶ RUN AGENT');
+});
+
+test('history cannot apply stale whole-line success to an entry run', () => {
+  const r = { runId: 'old', reason: 'done', runsLine: true, resultRunId: 'new',
+    lastStatus: 'ok', lastLineOutcome: { status: 'completed' }, lastOutput: 'new product' };
+  for (const record of [r, { ...r, resultRunId: undefined }, { ...r, resultRunId: 'old', lastLineOutcome: null }]) {
+    const result = view.fromHistory(record);
+    assert.equal(result.kind, 'pending'); assert.equal(result.label, 'Entry finished; line result unconfirmed'); assert.equal(result.output, '');
+  }
+  const current = { ...r, resultRunId: 'old' };
+  assert.equal(view.fromHistory(current).kind, 'ok'); assert.equal(view.fromHistory(current).output, 'new product');
+  const blocked = view.fromHistory({ ...current, lastStatus: 'error', lastLineOutcome: { status: 'blocked', reason: 'Reviewer could not open pixels' }, lastOutput: 'Partial build' });
+  assert.equal(blocked.kind, 'blocked'); assert.match(blocked.detail, /open pixels/); assert.equal(blocked.output, 'Partial build');
+  const idle = view.fromHistory({ ...current, lastLineOutcome: { status: 'no-work' }, lastOutput: '[SILENT]' });
+  assert.equal(idle.kind, 'no-work'); assert.equal(idle.output, '');
+  assert.equal(view.fromHistory({ ...r, reason: 'budget' }).kind, 'error');
+});
+
+test('actual history endpoint enriches only matching settlement and hides sticky failed output', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../sidecar/index.js'), 'utf8');
+  const handler = source.slice(source.indexOf('function handleCronHistory('), source.indexOf('// POST /api/cron — create a routine.'));
+  const job = saved({ id: 'routine', runsLine: true, lastRunId: 'latest', lastLineOutcome: { status: 'blocked', reason: 'Review failed' }, lastStatus: 'error', lastOutput: 'Partial files' });
+  const rows = [{ runId: 'older', cronJobId: 'routine', reason: 'done' }, { runId: 'latest', cronJobId: 'routine', reason: 'done' }];
+  const box = { URL, cronStore: { getJob: () => job }, cronJobs: [job], runStore: { all: () => rows } };
+  vm.createContext(box); vm.runInContext(handler, box);
+  let response;
+  const get = () => { box.handleCronHistory({ url: '/api/cron/history?id=routine' }, { writeHead() {}, end(body) { response = JSON.parse(body); } }); return response.runs; };
+  const current = get();
+  assert.equal(current[0].resultRunId, 'latest'); assert.equal(current[0].lastOutput, 'Partial files');
+  assert.equal(view.fromHistory(current[0]).kind, 'blocked');
+  assert.equal(current[1].resultRunId, undefined); assert.equal(current[1].lastOutput, undefined); assert.equal(view.fromHistory(current[1]).kind, 'pending');
+  job.lastRunId = 'unrelated'; assert.ok(get().every(r => !r.lastLineOutcome && !r.lastOutput));
+  job.lastRunId = 'latest'; job.lastLineOutcome = null; job.runsLine = false;
+  assert.equal(get()[0].lastOutput, null);
+});
+
+test('history renders final output and errors as escaped text with honest entry metrics', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/app/windows/routines.js'), 'utf8');
+  const render = source.slice(source.indexOf('    function historyLine('), source.indexOf('    async function toggleHistory('));
+  const box = { RoutineRunResult: view, esc: x => String(x).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])) };
+  vm.createContext(box); vm.runInContext(render, box);
+  const row = { runId: 'latest', resultRunId: 'latest', runsLine: true, reason: 'done', lastStatus: 'ok', lastLineOutcome: { status: 'completed' }, lastOutput: '<img src=x onerror=alert(1)>\nproduct.pdf' };
+  const html = box.historyLine(row);
+  assert.match(html, /Line finished/); assert.match(html, /Saved line output/); assert.match(html, /&lt;img/); assert.doesNotMatch(html, /<img/); assert.match(html, /entry:/); assert.match(html, /product\.pdf/);
+  const blocked = box.historyLine({ ...row, lastStatus: 'error', lastLineOutcome: { status: 'blocked', reason: '<script>bad</script>' } });
+  assert.match(blocked, /Line blocked/); assert.match(blocked, /&lt;script&gt;/); assert.doesNotMatch(blocked, /class="pos"/);
 });

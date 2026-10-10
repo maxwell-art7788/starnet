@@ -45,8 +45,25 @@ const RoutineRunResult = (() => {
     if (!state.runId || !saved || saved.lastRunId !== state.runId) return { kind: 'pending', label: 'Result not yet confirmed', detail: 'The stream ended, but its saved result could not be confirmed. Refresh or open run history.', output: state.reply.trim() === '[SILENT]' ? '' : state.reply };
     return fromSaved(saved);
   }
+  function fromHistory(row) {
+    row = row || {};
+    const matched = !!row.runId && row.resultRunId === row.runId;
+    if (row.runsLine === true && (!matched || !row.lastLineOutcome)) {
+      if (row.reason !== 'done') return { kind: 'error', label: 'Entry run incomplete', detail: value(row.error || row.reason || 'Entry completion was not confirmed.'), output: '' };
+      return { kind: 'pending', label: 'Entry finished; line result unconfirmed', detail: 'No whole-line outcome is saved for this run.', output: '' };
+    }
+    const result = row.runsLine === true ? fromSaved(row) : fromSaved({
+      lastStatus: row.reason === 'done' ? 'ok' : 'error', lastReason: row.reason, lastError: row.error,
+      lastOutput: matched ? row.lastOutput : null
+    });
+    // A failed line may retain useful partial work. Show it with the failure,
+    // never borrow a newer run's output or promote it to a completed delivery.
+    const output = matched && typeof row.lastOutput === 'string' && row.lastOutput.trim() !== '[SILENT]' ? row.lastOutput : '';
+    return Object.assign({}, result, { output, outputLabel: row.runsLine === true
+      ? (result.kind === 'ok' ? 'Saved line output' : 'Saved line output (not a completed delivery)') : 'Saved agent output' });
+  }
   const buttonLabel = job => job && job.runsLine === true ? '▶ RUN LINE' : '▶ RUN AGENT';
-  return { fromSaved, tracker, fromManual, buttonLabel };
+  return { fromSaved, tracker, fromManual, fromHistory, buttonLabel };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = RoutineRunResult;
 (() => {
@@ -676,17 +693,18 @@ if (typeof module !== 'undefined' && module.exports) module.exports = RoutineRun
     /* RUN HISTORY (2026-10-01): one routine's past runs, newest first, from GET /api/cron/history — each line is
        that run's own durable record (status, when, how long, spend, tool calls, error). A list redraw closes it. */
     function historyLine(r) {
-      const ok = r.reason === 'done';
+      const result = RoutineRunResult.fromHistory(r), ok = result.kind === 'ok', bad = result.kind === 'error' || result.kind === 'blocked';
       const usd = Number(r.usd) || 0;
       const cost = r.unmetered ? 'subscription' : usd >= 0.01 ? '$' + usd.toFixed(2) : usd > 0 ? '$' + usd.toFixed(4) : '$0';
       const secs = Math.round((Number(r.durationMs) || 0) / 1000);
       const took = secs >= 60 ? Math.floor(secs / 60) + 'm ' + (secs % 60) + 's' : secs + 's';
       const tools = Number(r.toolsOk) || 0, files = Number(r.artifacts) || 0;
-      return '<div class="mc-detail">' + (ok ? '<span class="pos">✓ ok</span>' : '<span style="color:var(--bad)">✕ ' + esc(r.reason || 'error') + '</span>') +
+      return '<div class="mc-detail">' + '<span' + (ok ? ' class="pos"' : bad ? ' style="color:var(--bad)"' : ' class="dim"') + '>' + (ok ? '✓ ' : bad ? '✕ ' : '○ ') + esc(result.label) + '</span>' +
         ' <span class="dim">' + esc(r.at ? new Date(r.at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '') +
-        ' · ' + took + ' · ' + cost + ' · ' + tools + ' tool call' + (tools === 1 ? '' : 's') +
+        ' · ' + (r.runsLine === true ? 'entry: ' : '') + took + ' · ' + cost + ' · ' + tools + ' tool call' + (tools === 1 ? '' : 's') +
         (files ? ' · ' + files + ' file' + (files === 1 ? '' : 's') : '') + '</span>' +
-        (r.error && !ok ? '<div class="dim">' + esc(String(r.error).slice(0, 240)) + '</div>' : '') + '</div>';
+        (result.detail ? '<div class="dim">' + esc(result.detail) + '</div>' : '') +
+        (result.output ? '<details><summary>' + esc(result.outputLabel) + '</summary><div style="white-space:pre-wrap">' + esc(result.output) + '</div></details>' : '') + '</div>';
     }
     async function toggleHistory(rowEl, id, btn) {
       const open = rowEl.querySelector('.rt-hist');

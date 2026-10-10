@@ -14962,9 +14962,17 @@ function handleCronHistory(req, res) {
       const r = rows[i];
       if (!r || !(r.cronJobId === id || (job.lastRunId && r.runId === job.lastRunId))) continue;
       if (out.some(x => x.runId === r.runId)) continue;
-      out.push({ runId: r.runId, at: r.endedAt || r.ts || 0, startedAt: r.startedAt || 0, durationMs: r.durationMs || 0,
+      const historyRow = { runId: r.runId, at: r.endedAt || r.ts || 0, startedAt: r.startedAt || 0, durationMs: r.durationMs || 0,
         reason: r.reason, usd: r.usd || 0, unmetered: !!r.unmetered, toolsOk: r.toolsOk || 0, streamId: r.streamId || '',
-        error: r.error || '', artifacts: (r.artifacts || []).length });
+        error: r.error || '', artifacts: (r.artifacts || []).length, runsLine: job.runsLine === true };
+      // The run store describes the entry agent. Only the matching settled job
+      // record can certify its whole line; never attach the newest result to old runs.
+      if (job.lastRunId && r.runId === job.lastRunId) Object.assign(historyRow, {
+        resultRunId: job.lastRunId, lastStatus: job.lastStatus, lastReason: job.lastReason,
+        lastError: job.lastError, lastLineOutcome: job.lastLineOutcome || null,
+        lastOutput: job.lastStatus === 'ok' || job.lastLineOutcome ? job.lastOutput : null
+      });
+      out.push(historyRow);
     }
     return json(200, { ok: true, id, runs: out });
   } catch (e) { return json(200, { ok: false, error: 'could not read routine history' }); }

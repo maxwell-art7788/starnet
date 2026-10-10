@@ -562,7 +562,7 @@ const WorkflowsWindow = (() => {
   function jobRows(l) {
     const rows = jobsOf(l.key).slice(0, 8);
     if (S.jobsErr && !rows.length) return '<p class="wfw-note">The job history could not be read — is the station running?</p>';
-    if (!rows.length) return '<p class="wfw-note">No jobs yet. The first one will show here.</p>';
+    if (!rows.length) return '<p class="wfw-note">No Send Job runs yet. Scheduled runs are under Schedules → History.</p>';
     const mark = s => ({ delivered: '<span class="wfw-st ok">✓ DONE</span>', 'no-work': '<span class="wfw-st">NO WORK</span>', running: '<span class="wfw-st run">RUNNING</span>', stopped: '<span class="wfw-st">STOPPED</span>',
       problem: '<span class="wfw-st warn">⚠ PROBLEM</span>', failed: '<span class="wfw-st warn">DIDN’T RUN</span>', interrupted: '<span class="wfw-st warn">INTERRUPTED</span>' })[s] || '';
     return '<div class="wfw-jobs">' + rows.map(j => '<button type="button" class="wfw-jobrow" data-job="' + esc(j.id) + '">' + mark(j.status) + '<span class="wfw-jtext">' + esc(j.text.replace(/\s+/g, ' ').slice(0, 120) || '(no text)') + '</span><span class="wfw-jmeta">' + esc(ago(j.startedAt) + (j.usd ? ' · ' + usd(j.usd) : '')) + '</span></button>').join('') + '</div>';
